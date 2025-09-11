@@ -74,7 +74,7 @@ Set your API key (choose one method):
 (setq matisse-claude-code-path "/usr/local/bin/claude")
 
 ;; Choose default model
-(setq matisse-model "claude-sonnet-4-20250514")  ; default
+(setq matisse-default-model "claude-sonnet-4-20250514")  ; default
 
 ;; Set temperature (0.0 to 1.0)
 (setq matisse-temperature 0.7)
@@ -87,7 +87,60 @@ Set your API key (choose one method):
 
 ;; Disable streaming (not recommended)
 (setq matisse-streaming nil)
+
+;; Enable/disable automatic selection context (default: t)
+(setq matisse-send-selection-p t)
+
+;; Adjust spinner/blink speed (default: 0.15 seconds)
+(setq matisse-spinner-interval 0.2)  ; Slower blinking
+(setq matisse-spinner-interval 0.1)  ; Faster blinking
 ```
+
+### Selection Context Tracking
+
+Matisse automatically tracks your text selections and cursor position, providing Claude with context about what code you're working on. This feature is enabled by default and works seamlessly in the background.
+
+#### How It Works
+
+- **Automatic Detection**: Matisse monitors your selections across all file buffers (but not matisse shell buffers)
+- **Smart Context**: When you send a message to Claude, your current selection context is automatically appended
+- **VSCode-Style References**: Selection context is formatted as `@/path/to/file.txt#L5:10-L9:25` (line:character positions)
+- **Mode-line Display**: The matisse mode-line shows your current context:
+  - `🤖 in matisse.el` - when cursor is positioned in a file
+  - `🤖 2 lines selected` - when text is selected
+  - `🤖⠋ in matisse.el` - with spinner animation during requests
+
+#### Configuration
+
+```elisp
+;; Enable selection context tracking (default: t)
+(setq matisse-send-selection-p t)
+
+;; Disable selection context tracking
+(setq matisse-send-selection-p nil)
+```
+
+#### Examples
+
+When you select code and send a message to Claude:
+
+```
+Your message here
+
+@/Users/steve/repos/matisse/matisse.el#L528:15-L538:20 - (defun matisse--update-mode-line ()
+  "Update the mode line with current spinner state and selection info."
+  (let* ((spinner-part (if matisse--waiting-for-response
+                           (concat " 🤖" (nth matisse--spinner-index matisse--spinner-chars))
+                         " 🤖"))
+         (selection-part (matisse--format-selection-status)))
+    (setq matisse--mode-line-format
+          (if selection-part
+              (concat spinner-part " " selection-part)
+            spinner-part))
+    (force-mode-line-update t)))
+```
+
+Claude receives both your message and the selected code context, making it easier to provide targeted assistance.
 
 ### Modeline Spinner
 
@@ -182,8 +235,12 @@ Matisse provides real-time visibility into Claude's internal operations through 
 ;; Enable/disable performance summaries (default: nil)
 (setq matisse-show-performance-summary nil)
 
-;; Enable/disable icons in progress messages (default: t)
-(setq matisse-progress-icons t)
+;; Configure icon display mode (default: 'ascii)
+;; Options: 'emoji (emoji icons), 'nerd-icons (Nerd Font icons), 'ascii (simple "-")
+(setq matisse-progress-icons-mode 'nerd-icons)
+
+;; Adjust icon size (default: 1.0)
+(setq matisse-icons-scale-factor 1.2)
 ```
 
 ### Interactive Commands
@@ -195,6 +252,58 @@ M-x matisse-toggle-file-changes
 M-x matisse-toggle-performance-summary
 M-x matisse-toggle-progress-icons
 ```
+
+### Customizing Icon Colors
+
+#### Using ef-themes Integration
+
+If you use [ef-themes](https://github.com/protesilaos/ef-themes), you can integrate Matisse progress icon colors with your theme's color palette. This ensures the icons adapt automatically when you switch between ef-themes:
+
+```elisp
+(defun my-matisse-ef-themes-integration ()
+  "Customize Matisse progress icon faces using ef-themes colors."
+  (ef-themes-with-colors
+    (custom-set-faces
+     ;; File operations
+     `(matisse-nerd-icon-read-face ((,c :foreground ,blue-cooler)))
+     `(matisse-nerd-icon-write-face ((,c :foreground ,green)))
+     `(matisse-nerd-icon-edit-face ((,c :foreground ,yellow-warmer)))
+     `(matisse-nerd-icon-multiedit-face ((,c :foreground ,yellow)))
+     
+     ;; Command and search operations  
+     `(matisse-nerd-icon-bash-face ((,c :foreground ,magenta)))
+     `(matisse-nerd-icon-grep-face ((,c :foreground ,red-cooler)))
+     `(matisse-nerd-icon-glob-face ((,c :foreground ,red-warmer)))
+     
+     ;; Task and web operations
+     `(matisse-nerd-icon-task-face ((,c :foreground ,cyan)))
+     `(matisse-nerd-icon-webfetch-face ((,c :foreground ,blue)))
+     `(matisse-nerd-icon-todowrite-face ((,c :foreground ,magenta-cooler)))
+     
+     ;; Status indicators
+     `(matisse-nerd-icon-success-face ((,c :foreground ,green-warmer)))
+     `(matisse-nerd-icon-performance-face ((,c :foreground ,cyan-warmer)))
+     `(matisse-nerd-icon-default-face ((,c :foreground ,fg-dim)))
+     )))
+
+;; Hook the function to ef-themes
+(add-hook 'ef-themes-post-load-hook #'my-matisse-ef-themes-integration)
+
+;; Set progress icons mode to see the colors
+(setq matisse-progress-icons-mode 'nerd-icons)
+```
+
+#### Manual Color Customization
+
+You can also manually customize individual icon faces:
+
+```elisp
+(custom-set-faces
+ '(matisse-nerd-icon-read-face ((t :foreground "#6A9FB5")))
+ '(matisse-nerd-icon-write-face ((t :foreground "#90A959")))
+ '(matisse-nerd-icon-edit-face ((t :foreground "#D4843E")))
+ ;; ... customize other faces as needed
+ )
 
 ## Buffer Display Configuration
 

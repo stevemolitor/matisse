@@ -13,4 +13,4 @@
 .pre-commit-config.yaml
 
 # Experimental sockets/MCP directory
-sockets-mcp/
+sockets-mcp/requests.log
