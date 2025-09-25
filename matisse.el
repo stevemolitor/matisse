@@ -588,7 +588,7 @@ start-char, end-char, text, has-selection.")
 
 ;;; Minor mode
 
-(defvar matisse--mode-line-format nil
+(defvar-local matisse--mode-line-format nil
   "Current mode line format for matisse-mode.")
 
 ;;; Utility functions
@@ -2532,7 +2532,8 @@ LANGUAGE: language string (e.g. \\='json\\=', \\='typescript\\=')"
                   (when matisse-debug
                     (message "DEBUG: Attempting to enable mode: %s" target-mode))
                   (when (fboundp mode-symbol)
-                    (funcall mode-symbol)
+                    (let ((inhibit-message t))
+                      (funcall mode-symbol))
                     (when matisse-debug
                       (message "DEBUG: Mode enabled, major-mode is now: %s" major-mode))
 
