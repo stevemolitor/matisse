@@ -12,42 +12,22 @@
 ;; It communicates with Claude Code via streaming JSON input/output for real-time responses.
 
 ;;; Code:
-
+;;;; Require
 (require 'json)
 (require 'map)
 (require 'seq)
 (require 'cl-lib)
 (require 'server)
+(require 'diff-mode)
+(require 'diff)
+(require 'project)
+(require 'transient nil t)
 
-;; External function declarations
+;;;; External function declarations
 (declare-function auth-source-search "auth-source" (&rest spec))
 
-;; Start Emacs server for hook callbacks if not already running
-(condition-case nil
-    (unless (server-running-p)
-      (server-start))
-  (error
-   ;; If server start fails, try to clean up and restart
-   (ignore-errors (server-force-delete))
-   (server-start)))
-
-;; Note: Server connection messages are suppressed at the wrapper script level
-;; by redirecting stderr to /dev/null when calling emacsclient
-
-(defvar matisse--shell-context) ; Forward declaration, defined later as buffer-local
-
-(defun matisse--route-to-shell (text)
-  "Route TEXT output to the matisse-shell implementation."
-  (when-let* ((buffer-name (plist-get matisse--shell-context :buffer-name))
-              (message-id (plist-get matisse--shell-context :message-id))
-              (shell-buffer (get-buffer buffer-name)))
-    (when (buffer-live-p shell-buffer)
-      (with-current-buffer shell-buffer
-        ;; Route response to shell using message ID from context
-        (matisse-shell--handle-response message-id text)))))
-
 ;;; Customization
-
+;;;; Matisse
 (defgroup matisse nil
   "Claude Code shell interface."
   :group 'tools)
@@ -114,6 +94,20 @@ Options are:
                  (const :tag "Plan Mode" "plan"))
   :group 'matisse)
 
+(defcustom matisse-in-buffer-permission-prompts t
+  "When non-nil, show permission prompts in the buffer instead of minibuffer.
+Users can respond by typing \\='yes\\=', \\='no\\=', or \\='accept\\=' at the prompt.
+When nil, permission prompts appear in the minibuffer as `y-or-n-p' queries."
+  :type 'boolean
+  :group 'matisse)
+
+(defcustom matisse-exit-commands '("exit" "quit" "bye")
+  "List of commands that will exit the Matisse shell.
+These commands are case-insensitive and work both at the regular prompt
+and when responding to permission prompts."
+  :type '(repeat string)
+  :group 'matisse)
+
 (defcustom matisse-show-progress-indicators t
   "Whether to show progress indicators for tool usage."
   :type 'boolean
@@ -129,7 +123,15 @@ Options are:
   :type 'boolean
   :group 'matisse)
 
-(defgroup matisse-progress-icons nil
+(defcustom matisse-verbose-mode nil
+  "Whether to display messages in full without truncation.
+When nil, long messages may be truncated with […] to keep the display concise.
+When non-nil, all messages are displayed in their entirety."
+  :type 'boolean
+  :group 'matisse)
+
+;;;; Matisse Icons
+(defgroup matisse-icons nil
   "Progress indicator icons and display settings."
   :group 'matisse)
 
@@ -138,13 +140,9 @@ Options are:
 This controls the relative size of icons in progress indicators.
 A value of 1.0 uses the default text height, 1.2 makes icons 20% larger, etc."
   :type 'float
-  :group 'matisse-progress-icons)
+  :group 'matisse-icons)
 
-(defgroup matisse-emoji-icons nil
-  "Emoji icon settings for progress indicators."
-  :group 'matisse-progress-icons)
-
-(defcustom matisse-progress-icons-mode 'ascii
+(defcustom matisse-icons-mode 'ascii
   "Mode for displaying progress indicator icons.
 Options:
 - \\='emoji: Use emoji icons
@@ -153,12 +151,37 @@ Options:
   :type '(choice (const :tag "Emoji" emoji)
                  (const :tag "Nerd Font icons" nerd-icons)
                  (const :tag "ASCII only" ascii))
-  :group 'matisse-progress-icons)
+  :group 'matisse-icons)
+
+;;;;; ASCII Icons
+(defgroup matisse-ascii-icons nil
+  "ASCII icon settings for progress indicators."
+  :group 'matisse-icons)
 
 (defcustom matisse-ascii-shell-prompt "❯"
   "ASCII character for shell prompt."
   :type 'string
-  :group 'matisse-progress-icons)
+  :group 'matisse-ascii-icons)
+
+(defcustom matisse-ascii-icon-permission ""
+  "ASCII representation for permission request prompts."
+  :type 'string
+  :group 'matisse-ascii-icons)
+
+(defcustom matisse-ascii-icon-allow "[OK]"
+  "ASCII representation for allowed/approved actions."
+  :type 'string
+  :group 'matisse-ascii-icons)
+
+(defcustom matisse-ascii-icon-deny "[NO]"
+  "ASCII representation for denied/rejected actions."
+  :type 'string
+  :group 'matisse-ascii-icons)
+
+;;;;; Emoji Icons
+(defgroup matisse-emoji-icons nil
+  "Emoji icon settings for progress indicators."
+  :group 'matisse-icons)
 
 (defcustom matisse-emoji-icon-read "📖"
   "Emoji icon for Read tool progress indicator."
@@ -225,14 +248,35 @@ Options:
   :type 'string
   :group 'matisse-emoji-icons)
 
+(defcustom matisse-emoji-icon-command "⚡"
+  "Emoji icon for command completion messages."
+  :type 'string
+  :group 'matisse-emoji-icons)
+
 (defcustom matisse-emoji-shell-prompt "🖌️"
   "Emoji character for shell prompt."
   :type 'string
   :group 'matisse-emoji-icons)
 
+(defcustom matisse-emoji-icon-permission "🔐"
+  "Emoji icon for permission request prompts."
+  :type 'string
+  :group 'matisse-emoji-icons)
+
+(defcustom matisse-emoji-icon-allow "✅"
+  "Emoji icon for allowed/approved actions."
+  :type 'string
+  :group 'matisse-emoji-icons)
+
+(defcustom matisse-emoji-icon-deny "❌"
+  "Emoji icon for denied/rejected actions."
+  :type 'string
+  :group 'matisse-emoji-icons)
+
+;;;;; Nerd Icons
 (defgroup matisse-nerd-icons nil
   "Nerd Font icon settings for progress indicators."
-  :group 'matisse-progress-icons)
+  :group 'matisse-icons)
 
 (defcustom matisse-nerd-icon-read ""
   "Nerd Font icon for Read tool progress indicator."
@@ -304,8 +348,27 @@ Options:
   :type 'string
   :group 'matisse-nerd-icons)
 
-;;; Nerd icon faces - copied from nerd-icons-faces.el to avoid dependency
+(defcustom matisse-nerd-icon-command ""
+  "Nerd Font icon for command completion messages."
+  :type 'string
+  :group 'matisse-nerd-icons)
 
+(defcustom matisse-nerd-icon-permission ""
+  "Nerd Font icon for permission request prompts."
+  :type 'string
+  :group 'matisse-nerd-icons)
+
+(defcustom matisse-nerd-icon-allow "✓"
+  "Nerd Font icon for allowed/approved actions."
+  :type 'string
+  :group 'matisse-nerd-icons)
+
+(defcustom matisse-nerd-icon-deny "✗"
+  "Nerd Font icon for denied/rejected actions."
+  :type 'string
+  :group 'matisse-nerd-icons)
+
+;;;;; Nerd Icon Faces
 (defface matisse-nerd-icon-blue
   '((((background dark)) :foreground "#6A9FB5")
     (((background light)) :foreground "#6A9FB5"))
@@ -466,6 +529,101 @@ Uses maroon color suitable for timing information."
   :type 'face
   :group 'matisse-nerd-icon-faces)
 
+(defcustom matisse-nerd-icon-command-face 'matisse-nerd-icon-yellow
+  "Face for command completion nerd icon.
+Uses yellow color suitable for command feedback."
+  :type 'face
+  :group 'matisse-nerd-icon-faces)
+
+(defcustom matisse-nerd-icon-permission-face 'matisse-nerd-icon-yellow
+  "Face for permission request nerd icon.
+Uses yellow color to indicate attention required."
+  :type 'face
+  :group 'matisse-nerd-icon-faces)
+
+(defcustom matisse-nerd-icon-allow-face 'matisse-nerd-icon-lgreen
+  "Face for allowed/approved action nerd icon.
+Uses light green color to indicate success."
+  :type 'face
+  :group 'matisse-nerd-icon-faces)
+
+(defcustom matisse-nerd-icon-deny-face 'matisse-nerd-icon-pink
+  "Face for denied/rejected action nerd icon.
+Uses pink/red color to indicate rejection."
+  :type 'face
+  :group 'matisse-nerd-icon-faces)
+
+;;;; Keybindings
+(defgroup matisse-keybindings nil
+  "Key binding settings for Matisse shell mode."
+  :group 'matisse)
+
+;; Key binding customizations for matisse-shell-mode
+(defcustom matisse-key-return "RET"
+  "Key binding for handling return/enter in matisse shell."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-newline "S-<return>"
+  "Key binding for inserting a newline in matisse shell."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-history-previous "<up>"
+  "Key binding for navigating to previous message in history."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-history-next "<down>"
+  "Key binding for navigating to next message in history."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-history-previous-alt "M-p"
+  "Alternative key binding for navigating to previous message in history."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-history-next-alt "M-n"
+  "Alternative key binding for navigating to next message in history."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-history-search-backward "M-r"
+  "Key binding for searching backward through history."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-history-search-forward "M-s"
+  "Key binding for searching forward through history."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-history-complete "C-c C-r"
+  "Key binding for selecting from history with completion."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-cancel "C-c C-c"
+  "Key binding for canceling the currently processing message."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-clear-buffer "C-l"
+  "Key binding for clearing all messages and resetting buffer."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-beginning-of-line "C-a"
+  "Key binding for moving to beginning of line or after prompt."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-yank-media "C-c mi"
+  "Key binding for inserting media/images."
+  :type 'string
+  :group 'matisse-keybindings)
+
 (defcustom matisse-allowed-tools nil
   "List of allowed tools for Claude Code.
 If nil, all tools are allowed. Otherwise, specify tools like:
@@ -497,16 +655,116 @@ Smaller values make faster blinking, larger values make slower blinking."
   :type 'number
   :group 'matisse)
 
-;;; Internal variables
+(defcustom matisse-auto-compact-threshold 50000
+  "Suggest compaction after this many tokens (roughly 25% of context)."
+  :type 'integer
+  :group 'matisse)
 
+(defcustom matisse-show-token-usage t
+  "Whether to display token usage in mode line."
+  :type 'boolean
+  :group 'matisse)
+
+(defcustom matisse-override-mode-line t
+  "Whether to override the entire mode line in matisse shell buffers.
+When non-nil, matisse will take over the entire mode line display,
+showing only the matisse-specific information (icon, buffer name,
+mode, tokens, selection). When nil, matisse information is added
+to the existing mode line via the matisse-mode lighter."
+  :type 'boolean
+  :group 'matisse)
+
+(defcustom matisse-chunk-size 32768
+  "Size of chunks when sending large messages (32KB).
+Used to avoid pipe buffer blocking with large prompts."
+  :type 'integer
+  :group 'matisse)
+
+(defcustom matisse-chunk-threshold 65536
+  "Messages larger than this will be sent in chunks (64KB).
+This prevents blocking when sending large prompts through the pipe."
+  :type 'integer
+  :group 'matisse)
+
+(defcustom matisse-large-paste-threshold 5000
+  "Number of characters above which to show paste placeholder.
+Text pastes larger than this will show '[Pasted text #N +X lines]'
+instead of the full content in the buffer."
+  :type 'integer
+  :group 'matisse)
+
+(defcustom matisse-debug-log-max-length 500
+  "Maximum length of arguments in debug log messages.
+Longer values will be truncated to prevent buffer performance issues."
+  :type 'integer
+  :group 'matisse)
+
+(defcustom matisse-max-progress-message-length 1000
+  "Maximum length of progress and command completion messages.
+Even in verbose mode, messages longer than this will be truncated
+to prevent buffer performance issues. Set to nil for no limit."
+  :type '(choice (const :tag "No limit" nil)
+                 (integer :tag "Max characters"))
+  :group 'matisse)
+
+(defcustom matisse-large-prompt-threshold 100000
+  "Maximum characters for inline prompts and arguments.
+User prompts and slash command arguments larger than this will be written
+to session-scoped temporary files and referenced using @ syntax instead of
+being sent inline. This prevents \\='Prompt is too long\\=' errors with large
+inputs like CI logs or pasted code files."
+  :type 'integer
+  :group 'matisse)
+
+(defcustom matisse-buffer-name-function #'matisse--default-buffer-name
+  "Function to generate matisse shell buffer names.
+The function is called with one argument, the directory path, and should
+return a base name string (without uniquification).  The returned name will
+be passed to `generate-new-buffer-name' to ensure uniqueness.
+
+The default function uses the project name from project.el if available,
+otherwise falls back to the abbreviated directory path."
+  :type 'function
+  :group 'matisse)
+
+;;; Variables & Constants
+;;;; Internal Constants
+(defconst matisse--spinner-chars '("/" "|" "\\" "-")
+  "Characters used for the spinner animation.")
+
+(defconst matisse--mode-line-separator "  "
+  "Separator between mode line sections.")
+
+(defvar matisse--scroll-throttle-ms 50
+  "Minimum milliseconds between scroll operations.")
+
+;;;; Dynamic Variables & Data Structures
+(defvar matisse--slash-commands
+  '(("/clear" . "Clear the conversation buffer")
+    ("/compact" . "Compact conversation to save context")
+    ("/context" . "Show current context information")
+    ("/cost" . "Display token usage and cost information")
+    ("/init" . "Initialize a new CLAUDE.md file")
+    ("/output-style:new" . "Create a custom output style")
+    ("/pr-comments" . "Get comments from a GitHub pull request")
+    ("/release-notes" . "View release notes")
+    ("/todos" . "List current todo items")
+    ("/review" . "Review a pull request")
+    ("/security-review" . "Complete a security review"))
+  "Available slash commands and their descriptions.
+This is a fallback list used before discovery completes.")
+
+(defvar matisse--compact-options
+  '(("--instructions" . "Provide specific guidance for compaction")
+    ("--help" . "Show help for compact command"))
+  "Options available for the /compact command.")
+
+;;;; Buffer-Local State Variables
 (defvar-local matisse--process nil
   "The Claude Code process.")
 
 (defvar-local matisse--pending-json ""
   "Buffer for incomplete JSON data.")
-
-(defvar matisse--config nil
-  "Shell configuration for matisse.")
 
 (defvar-local matisse--initial-directory nil
   "The directory where the Matisse session was initially started.
@@ -524,11 +782,12 @@ Used for consistent project paths regardless of directory changes.")
 (defvar-local matisse--spinner-timer nil
   "Timer for the spinner animation.")
 
+(defvar-local matisse--pending-permission-request nil
+  "Pending permission request waiting for user response in buffer.
+Format: (process request-id tool-name tool-input suggestions)")
+
 (defvar-local matisse--spinner-index 0
   "Current index in the spinner sequence.")
-
-(defconst matisse--spinner-chars '("/" "|" "\\" "-")
-  "Characters used for the spinner animation.")
 
 (defvar-local matisse--active-tools nil
   "List of currently active tool operations.")
@@ -548,9 +807,114 @@ Used for consistent project paths regardless of directory changes.")
 (defvar-local matisse--pending-message nil
   "The last message sent that hasn't received a response yet.")
 
+(defvar-local matisse--pending-slash-command nil
+  "The slash command currently being processed, if any.")
+
 (defvar-local matisse--current-model nil
   "The current model for this session. If nil, uses matisse-default-model.")
 
+(defvar-local matisse--current-permission-mode nil
+  "Current permission mode for this session.
+If nil, uses matisse-permission-mode.")
+
+(defvar-local matisse--pending-permission-update nil
+  "Pending permission mode update to send in next control response.
+Set by `matisse-set-permission-mode' when mode is changed.
+Included as updatedPermissions in next control_response.")
+
+(defvar-local matisse--available-commands nil
+  "Commands available from Claude Code, discovered at initialization.")
+
+(defvar-local matisse--available-models nil
+  "Models available from Claude Code, discovered at initialization.")
+
+(defvar-local matisse--mode-line-left nil
+  "Left-aligned portion of mode line for matisse-mode.")
+
+(defvar-local matisse--mode-line-right nil
+  "Right-aligned portion of mode line for matisse-mode.")
+
+(defvar-local matisse--total-tokens-used 0
+  "Total tokens used in current conversation.")
+
+(defvar-local matisse--tokens-since-compact 0
+  "Tokens used since last compaction.")
+
+(defvar-local matisse--pending-images nil
+  "List of pending images to be included with the next message.
+Each element is a plist with :type, :data, and optionally :filename.")
+
+(defvar-local matisse--pending-large-paste nil
+  "Stores the actual text of a large paste when placeholder is shown.
+Plist with :text and :placeholder-text.")
+
+(defvar-local matisse--large-paste-counter 0
+  "Counter for numbering large paste placeholders.")
+
+(defvar-local matisse--temp-files nil
+  "List of session-scoped temp files created for large arguments.
+Files persist for session lifetime to support follow-up questions and resume.
+Cleaned up only on explicit /clear command.")
+
+(defvar-local matisse--message-queue)
+
+(defvar-local matisse--shell-prompt nil
+  "The prompt string to use in matisse shell.")
+
+(defvar-local matisse--shell-prompt-regex nil
+  "Regex pattern to match the matisse shell prompt.")
+
+(defvar-local matisse--shell-context nil
+  "Context information for integration with main matisse process.")
+
+(defvar-local matisse--current-message-id nil
+  "ID of the currently processing message for response routing.")
+
+(defvar-local matisse--response-sections nil
+  "Hash table mapping message IDs to response section markers.")
+
+(defvar-local matisse--source-buffer nil
+  "Reference to the source shell buffer for history display mode.")
+
+(defvar-local matisse--message-counter 0
+  "Counter for generating unique message IDs.")
+
+(defvar-local matisse--message-queue nil
+  "Unified queue of all messages with their metadata.
+Each element is a plist with:
+  :id         - unique message ID
+  :type       - \\='user or \\='slash-command
+  :text       - the message text
+  :command    - slash command name if type is \\='slash-command
+  :status     - \\='pending, \\='processing, \\='completed, or \\='cancelled
+  :timestamp  - when the message was queued")
+
+(defvar-local matisse--queue-paused nil
+  "When non-nil, automatic queue processing is paused.
+Set to t when user interrupts with \\[matisse-interrupt].
+Cleared when user sends a new message.")
+
+(defvar-local matisse--history nil
+  "List of previous messages, newest first.")
+
+(defvar-local matisse--history-index nil
+  "Current position in history during navigation.")
+
+(defvar-local matisse--current-input ""
+  "Current input being typed before history navigation.")
+
+(defvar-local matisse--output-start-marker nil
+  "Marker pointing to start of message history region.")
+
+(defvar-local matisse--message-sections nil
+  "Hash table storing message section markers.")
+
+(defvar-local matisse--last-scroll-time nil
+  "Time of last scroll operation to throttle rapid scrolling.")
+
+;;;; Global State Variables
+(defvar matisse--config nil
+  "Shell configuration for matisse.")
 
 (defvar matisse--last-selection nil
   "Last text selection from a non-matisse buffer.
@@ -560,38 +924,48 @@ start-char, end-char, text, has-selection.")
 (defvar matisse--selection-timer nil
   "Timer for debouncing selection updates.")
 
-;;; Token tracking variables
+;;; Core Utilities
+(defun matisse--route-to-shell (text)
+  "Route TEXT output to the matisse-shell implementation."
+  (when-let* ((buffer-name (plist-get matisse--shell-context :buffer-name))
+              (message-id (plist-get matisse--shell-context :message-id))
+              (shell-buffer (get-buffer buffer-name)))
+    (when (buffer-live-p shell-buffer)
+      (with-current-buffer shell-buffer
+        ;; Route response to shell using message ID from context
+        (matisse-shell--handle-response message-id text)))))
 
-(defvar-local matisse--total-tokens-used 0
-  "Total tokens used in current conversation.")
+(defun matisse--default-buffer-name (dir)
+  "Generate default matisse shell buffer name for directory DIR.
+Uses the project name from project.el if available, otherwise uses
+the abbreviated directory path."
+  (let* ((proj (project-current nil dir))
+         (context-name (if proj
+                           (project-name proj)
+                         (abbreviate-file-name (directory-file-name dir)))))
+    (format "*matisse[%s]" context-name)))
 
-(defvar-local matisse--tokens-since-compact 0
-  "Tokens used since last compaction.")
+(defun matisse--generate-buffer-name (dir)
+  "Generate a unique matisse shell buffer name for directory DIR.
+Uses `matisse-buffer-name-function' to generate the base name,
+then ensures uniqueness with a numeric suffix before the closing asterisk."
+  (let* ((base-name (funcall matisse-buffer-name-function dir))
+         (buffer-name base-name)
+         (counter 2))
+    ;; Check if base name (with trailing *) already exists
+    (if (not (get-buffer (concat buffer-name "*")))
+        (concat buffer-name "*")
+      ;; Find unique name by adding <N> before the closing *
+      (while (get-buffer (format "%s<%d>*" buffer-name counter))
+        (setq counter (1+ counter)))
+      (format "%s<%d>*" buffer-name counter))))
 
-(defcustom matisse-auto-compact-threshold 50000
-  "Suggest compaction after this many tokens (roughly 25% of context)."
-  :type 'integer
-  :group 'matisse)
-
-(defcustom matisse-show-token-usage t
-  "Whether to display token usage in mode line."
-  :type 'boolean
-  :group 'matisse)
-
-
-(defvar matisse-command-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map "q" #'matisse-quit)
-    (define-key map "c" #'matisse-cancel)
-    map)
-  "Keymap for Matisse commands.")
-
-;;; Minor mode
-
-(defvar-local matisse--mode-line-format nil
-  "Current mode line format for matisse-mode.")
-
-;;; Utility functions
+(defun matisse--get-working-directory ()
+  "Get the working directory for starting a matisse session.
+Returns the project root if in a project, otherwise returns `default-directory'."
+  (if-let* ((proj (project-current)))
+      (expand-file-name (project-root proj))
+    (expand-file-name default-directory)))
 
 (defun matisse--get-project-directory ()
   "Get the project directory for Claude sessions based on initial directory."
@@ -607,7 +981,7 @@ start-char, end-char, text, has-selection.")
   "Get the session file path for SESSION-ID."
   (expand-file-name (concat session-id ".jsonl") (matisse--get-project-directory)))
 
-(defun matisse-get-latest-conversation-file ()
+(defun matisse--get-latest-conversation-file ()
   "Get the path to the most recent conversation file."
   (let* ((project-dir (matisse--get-project-directory))
          (files (when (file-directory-p project-dir)
@@ -617,73 +991,263 @@ start-char, end-char, text, has-selection.")
                          (time-less-p (nth 5 (file-attributes b))
                                      (nth 5 (file-attributes a)))))))))
 
-(defun matisse-replay-previous-conversation ()
+(defun matisse-resume ()
+  "Resume a previous conversation from the project directory.
+Displays a list of previous sessions with timestamps and previews,
+allowing the user to select one to resume in a new shell.
+Starts in the project root if in a project, otherwise in `default-directory'."
+  (interactive)
+  ;; Get the working directory first and temporarily bind matisse--initial-directory
+  (let* ((initial-dir (matisse--get-working-directory))
+         (matisse--initial-directory initial-dir)
+         (project-dir (matisse--get-project-directory))
+         (session-files (when (file-directory-p project-dir)
+                         (directory-files project-dir t "\\.jsonl$" t))))
+    (if (not session-files)
+        (message "No previous conversations found in %s" project-dir)
+      ;; Build completion candidates with previews
+      (let* ((candidates
+              (delq nil  ; Remove nil entries (filtered empty sessions)
+                    (mapcar (lambda (file)
+                              (let* ((session-id (file-name-base file))
+                                     (attrs (file-attributes file))
+                                     (mtime (nth 5 attrs))
+                                     (timestamp (format-time-string "%Y-%m-%d %H:%M" mtime))
+                                     (msg-count (matisse--count-session-messages file))
+                                     (preview (let ((raw-preview (matisse--get-session-preview file)))
+                                               ;; Clean up preview: remove newlines and truncate
+                                               (truncate-string-to-width
+                                                (string-replace "\n" " " raw-preview)
+                                                50 nil nil "[…]"))))
+                                ;; Only include sessions with messages
+                                (when (> msg-count 0)
+                                  ;; Store metadata as text properties on session-id
+                                  (propertize session-id
+                                             'timestamp timestamp
+                                             'msg-count msg-count
+                                             'preview preview))))
+                            ;; Sort by modification time (newest first)
+                            (sort session-files
+                                  (lambda (a b)
+                                    (time-less-p (nth 5 (file-attributes b))
+                                                (nth 5 (file-attributes a))))))))
+             (choice (when candidates
+                       (completing-read "Resume conversation: "
+                                       (lambda (string pred action)
+                                         (cond
+                                          ((eq action 'metadata)
+                                           `(metadata
+                                             (display-sort-function . identity)
+                                             (affixation-function . ,#'matisse--resume-affixation)))
+                                          (t (complete-with-action action candidates string pred))))
+                                       nil t)))
+             (session-id choice))
+        (if (not candidates)
+            (message "No conversations with messages found in %s" project-dir)
+          (when session-id
+            ;; Create new shell buffer and resume the session
+            (let* ((new-buffer (matisse--generate-buffer-name initial-dir))
+                   (session-file (matisse--get-session-file session-id)))
+              (switch-to-buffer new-buffer)
+              (matisse-shell-mode)
+
+              ;; Set default-directory and matisse--initial-directory for the session
+              (setq default-directory initial-dir
+                    matisse--initial-directory initial-dir)
+
+              ;; Clear the initial prompt that was inserted during buffer initialization
+              ;; but keep the header (first 3 lines: welcome, connected, blank line)
+              (let ((inhibit-read-only t))
+                (save-excursion
+                  (goto-char (point-min))
+                  (forward-line 3)              ; Skip header lines
+                  (delete-region (point) (point-max))))
+
+              ;; Replay conversation history in the buffer
+              (let ((last-message-type (matisse--replay-conversation-from-file session-file)))
+                ;; Apply syntax highlighting
+                (matisse--overlays-put)
+
+                ;; Insert prompt based on the last message type
+                (cond
+                 ;; If last message was from assistant, add a prompt for the user
+                 ((eq last-message-type 'assistant)
+                  (matisse--insert-prompt))
+                 ;; If last message was from user, no prompt needed - Claude will respond
+                 ((eq last-message-type 'user)
+                  nil)
+                 ;; If no messages at all, add a prompt
+                 ((null last-message-type)
+                  (matisse--insert-prompt))))
+
+              ;; Start process with resume flag
+              (matisse--start-process-with-resume session-id)
+              (message "Resumed session: %s" session-id))))))))
+
+(defun matisse--resume-affixation (candidates)
+  "Format CANDIDATES for matisse-resume with aligned columns.
+Each candidate has timestamp, msg-count, and preview as text properties."
+  (mapcar (lambda (cand)
+            (let ((timestamp (get-text-property 0 'timestamp cand))
+                  (msg-count (get-text-property 0 'msg-count cand))
+                  (preview (get-text-property 0 'preview cand)))
+              (list cand
+                    (concat (propertize (format "%-16s" timestamp) 'face 'marginalia-date)
+                            "  "
+                            (propertize (format "%4d msgs" msg-count) 'face 'marginalia-number)
+                            "  ")
+                    (concat "  "
+                            (propertize preview 'face 'marginalia-documentation)))))
+          candidates))
+
+(defun matisse--count-session-messages (session-file)
+  "Count the number of user and assistant messages in SESSION-FILE.
+Returns the total count of messages."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents session-file)
+        (goto-char (point-min))
+        (let ((count 0))
+          (while (not (eobp))
+            (let ((line (buffer-substring-no-properties
+                        (line-beginning-position)
+                        (line-end-position))))
+              (when (not (string-empty-p line))
+                (let ((json (ignore-errors (json-parse-string line :object-type 'alist))))
+                  (when json
+                    (let ((type (alist-get 'type json)))
+                      ;; Count user and assistant messages
+                      (when (or (equal type "user") (equal type "assistant"))
+                        (setq count (1+ count)))))))
+              (forward-line 1)))
+          count))
+    (error 0)))
+
+(defun matisse--get-session-preview (session-file)
+  "Get a preview string from SESSION-FILE.
+First tries to extract the summary from the first line.
+Falls back to the first user message text.
+Returns a short text preview or the string `No preview available'."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents session-file nil 0 50000) ; Read first 50KB
+        (goto-char (point-min))
+
+        ;; Try to get summary from first line
+        (when (not (eobp))
+          (let* ((first-line (buffer-substring-no-properties
+                             (line-beginning-position)
+                             (line-end-position)))
+                 (summary-json (ignore-errors (json-parse-string first-line :object-type 'alist)))
+                 (summary (alist-get 'summary summary-json)))
+            (if summary
+                summary
+              ;; Fall back to finding first user message
+              (goto-char (point-min))
+              (if (re-search-forward "\"type\":\"user\"" nil t)
+                  (progn
+                    (beginning-of-line)
+                    (let* ((line (buffer-substring-no-properties
+                                 (line-beginning-position)
+                                 (line-end-position)))
+                           (json (ignore-errors (json-parse-string line :object-type 'alist)))
+                           (message (alist-get 'message json))
+                           (content (alist-get 'content message)))
+                      (if (and content (vectorp content) (> (length content) 0))
+                          (let ((first-item (aref content 0)))
+                            (or (alist-get 'text first-item) "No preview available"))
+                        "No preview available")))
+                "No preview available")))))
+    (error "No preview available")))
+
+(defun matisse--replay-conversation-from-file (file)
+  "Replay conversation from FILE into the current buffer.
+Returns \='user if last message was from user, \='assistant if from
+assistant, nil if no messages."
+  (let ((target-buffer (current-buffer))
+        (message-count 0)
+        (last-message-type nil))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((line (buffer-substring-no-properties
+                     (line-beginning-position)
+                     (line-end-position))))
+          (when (and (> (length line) 0)
+                     (string-match "\"type\":\"\\(user\\|assistant\\)\"" line))
+            (condition-case nil
+                (let* ((json (json-parse-string line :object-type 'alist))
+                       (type (alist-get 'type json))
+                       (message (alist-get 'message json))
+                       (content (alist-get 'content message)))
+                  (when content
+                    ;; Handle both list and vector formats
+                    (let ((items (if (vectorp content)
+                                     (append content nil) ; Convert vector to list
+                                   content)))
+                      (dolist (item items)
+                        (when (equal (alist-get 'type item) "text")
+                          (let ((text (alist-get 'text item)))
+                            (when text
+                              (setq message-count (1+ message-count))
+                              (setq last-message-type (intern type))
+                              (with-current-buffer target-buffer
+                                (let ((inhibit-read-only t))
+                                  (cond
+                                   ((equal type "user")
+                                    ;; Format user message with prompt char and inactive face
+                                    (let ((prompt-char (matisse--get-icon :prompt)))
+                                      (insert (propertize (concat prompt-char " " text)
+                                                          'face 'matisse-prompt-inactive-face))
+                                      (insert "\n")))
+                                   ((equal type "assistant")
+                                    ;; Format assistant message - just text
+                                    (insert text)
+                                    (insert "\n\n"))))))))))))
+              (error nil))))
+        (forward-line)))
+    ;; Return the last message type
+    last-message-type))
+
+(defun matisse--replay-previous-conversation ()
   "Replay the previous conversation in current buffer.
 
 Returns \='user if last message was from user, \='assistant if from
 assistant, nil if no messages."
-  (let ((file (matisse-get-latest-conversation-file))
-        (target-buffer (current-buffer))
-        (message-count 0)
-        (last-message-type nil))
+  (let ((file (matisse--get-latest-conversation-file)))
     (when file
-      (with-temp-buffer
-        (insert-file-contents file)
-        (goto-char (point-min))
-        (while (not (eobp))
-          (let ((line (buffer-substring-no-properties
-                       (line-beginning-position)
-                       (line-end-position))))
-            (when (and (> (length line) 0)
-                       (string-match "\"type\":\"\\(user\\|assistant\\)\"" line))
-              (condition-case nil
-                  (let* ((json (json-parse-string line :object-type 'alist))
-                         (type (alist-get 'type json))
-                         (message (alist-get 'message json))
-                         (content (alist-get 'content message)))
-                    (when content
-                      ;; Handle both list and vector formats
-                      (let ((items (if (vectorp content)
-                                       (append content nil) ; Convert vector to list
-                                     content)))
-                        (dolist (item items)
-                          (when (equal (alist-get 'type item) "text")
-                            (let ((text (alist-get 'text item)))
-                              (when text
-                                (setq message-count (1+ message-count))
-                                (setq last-message-type (intern type))
-                                (with-current-buffer target-buffer
-                                  (let ((inhibit-read-only t))
-                                    (cond
-                                     ((equal type "user")
-                                      ;; Format user message with prompt char and inactive face
-                                      (let ((prompt-char (matisse--get-shell-prompt-character)))
-                                        (insert (propertize (concat prompt-char " " text)
-                                                            'face 'matisse-prompt-inactive-face))
-                                        (insert "\n")))
-                                     ((equal type "assistant")
-                                      ;; Format assistant message - just text
-                                      (insert text)
-                                      (insert "\n\n"))))))))))))
-                (error nil))))
-          (forward-line)))
-      ;; Return the last message type
-      last-message-type)))
+      (matisse--replay-conversation-from-file file))))
 
 (defun matisse--update-mode-line ()
   "Update the mode line with current spinner state and selection info."
-  (let* ((spinner-part (if matisse--waiting-for-response
-                           (if (< (mod matisse--spinner-index 2) 1)
-                               " 🔥"  ; Fire emoji when "on"
-                             " 🤖") ; Robot when "off"
-                         " 🤖"))
-         (selection-part (matisse--format-selection-status))
-         (token-part (matisse--format-token-status)))
-    (setq matisse--mode-line-format
-          (concat spinner-part
-                  (if token-part (concat " " token-part) "")
-                  (if selection-part (concat " " selection-part) "")))
-    (force-mode-line-update t)))
+  ;; Update mode line in all matisse shell buffers
+  (dolist (buffer (buffer-list))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (eq major-mode 'matisse-shell-mode)
+          (let* ((spinner-part (cond
+                                (matisse--pending-permission-request
+                                 matisse-emoji-icon-permission)
+                                (matisse--waiting-for-response
+                                 (if (< (mod matisse--spinner-index 2) 1)
+                                     "🔥"  ; Fire emoji when "on"
+                                   "🤖")) ; Robot when "off"
+                                (t "🤖")))
+                 (buffer-part (propertize (buffer-name) 'face 'font-lock-constant-face))
+                 (selection-part (matisse--format-selection-status))
+                 (token-part (matisse--format-token-status))
+                 (mode-part (matisse--format-permission-mode)))
+            (setq matisse--mode-line-left
+                  (concat matisse--mode-line-separator spinner-part
+                          " " buffer-part
+                          (if mode-part (concat matisse--mode-line-separator mode-part) "")
+                          (if token-part (concat " " token-part) ""))
+                  matisse--mode-line-right
+                  (if selection-part
+                      (concat matisse--mode-line-separator selection-part "   ")
+                    ""))
+            (force-mode-line-update t)))))))
 
 (defun matisse--make-spinner-tick (buffer)
   "Create a spinner tick function for BUFFER."
@@ -722,244 +1286,648 @@ assistant, nil if no messages."
       (setq matisse--waiting-for-response nil)
       (matisse--stop-spinner))))
 
-(defvar matisse-mode-map
-  (let ((map (make-sparse-keymap)))
-    (when matisse-prefix-key
-      (define-key map (kbd matisse-prefix-key) matisse-command-map))
-    map)
-  "Keymap for `matisse-mode'.")
+;;; Permission System
+;;;; Permission Logic
+(defun matisse--should-auto-allow-tool (tool-name)
+  "Check if TOOL-NAME should be auto-allowed without prompting.
+Returns t if tool should be auto-allowed, nil otherwise."
+  (or
+   ;; If in bypass mode, allow everything
+   (string= (or matisse--current-permission-mode matisse-permission-mode) "bypassPermissions")
+   ;; Always allow read-only tools and ExitPlanMode
+   (member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool" "ExitPlanMode"))))
 
-(defun matisse--cleanup-on-kill ()
-  "Cleanup function called when a matisse buffer is killed.
-Does the same cleanup as `matisse-quit' without killing the buffer."
-  (when matisse--process
-    (delete-process matisse--process)
-    (setq matisse--process nil))
-  (setq matisse--pending-json ""
-        matisse--conversation-id nil
-        matisse--message-count 0
-        matisse--shell-context nil
-        matisse--waiting-for-response nil
-        matisse--active-tools nil
-        matisse--progress-buffer ""
-        matisse--interrupted-session-id nil
-        matisse--interrupted-tools nil
-        matisse--pending-message nil
-        matisse--current-model nil)
-  (matisse--stop-spinner)
-  ;; Clean up selection timer
-  (when matisse--selection-timer
-    (cancel-timer matisse--selection-timer)
-    (setq matisse--selection-timer nil)))
+(defun matisse--log-permission-decision (buffer-name _tool-name decision)
+  "Log permission DECISION for TOOL-NAME in BUFFER-NAME.
+This adds a simple log entry to the matisse shell buffer."
+  (when-let* ((buffer (get-buffer buffer-name)))
+    (with-current-buffer buffer
+      (let ((insert-pos (matisse--get-current-response-position)))
+        (save-excursion
+          (goto-char insert-pos)
+          (let ((inhibit-read-only t))
+            (insert (format "  → %s%s\n"
+                           (if (string= decision "allow")
+                               (matisse--get-icon :allow)
+                             (matisse--get-icon :deny))
+                           (if (string= decision "allow") "Allowed" "Denied")))
+            ;; Update the response-end marker if we have one
+            (when (and (boundp 'matisse--current-message-id)
+                       matisse--current-message-id
+                       (boundp 'matisse--response-sections)
+                       matisse--response-sections)
+              (let ((section (gethash matisse--current-message-id matisse--response-sections)))
+                (when section
+                  (let ((response-end (plist-get section :response-end)))
+                    (when (markerp response-end)
+                      (set-marker response-end (point)))))))))))))
 
-(define-minor-mode matisse-mode
-  "Minor mode for Matisse Claude Code interface."
-  :lighter (:eval matisse--mode-line-format)
-  :global nil
-  :keymap matisse-mode-map
-  (if matisse-mode
-      (progn
-        (matisse--update-mode-line)
-        ;; Update mode line for matisse-mode activation
-        ;; Add buffer-local kill hook to do full cleanup
-        (add-hook 'kill-buffer-hook #'matisse--cleanup-on-kill nil t)
-        ;; Add global hook for selection tracking
-        (add-hook 'post-command-hook #'matisse--track-selection-change))
-    (progn
-      (when matisse--spinner-timer
-        (cancel-timer matisse--spinner-timer)
-        (setq matisse--spinner-timer nil))
-      ;; Remove the kill hook
-      (remove-hook 'kill-buffer-hook #'matisse--cleanup-on-kill t)
-      ;; Remove selection tracking hook when no matisse buffers are active
-      (unless (cl-some (lambda (buffer)
-                         (with-current-buffer buffer
-                           matisse-mode))
-                       (buffer-list))
-        (remove-hook 'post-command-hook #'matisse--track-selection-change)))))
-
-
-;;; Utility functions
-
-(defun matisse--get-current-model ()
-  "Get the current model to use for this session."
-  (or matisse--current-model matisse-default-model))
-
-(defun matisse--get-api-key ()
-  "Get the API key for Claude Code."
+(defun matisse--decide-tool-permission-shell (tool-name tool-input _tool-id &optional buffer-name)
+  "Decide whether to allow TOOL-NAME with TOOL-INPUT using `y-or-n-p'.
+TOOL-ID is the tool request identifier (unused).
+BUFFER-NAME is the specific matisse shell buffer (used in prompt).
+Returns \"allow\" or \"deny\" synchronously."
   (cond
-   ((functionp matisse-api-key)
-    (funcall matisse-api-key))
-   ((stringp matisse-api-key)
-    matisse-api-key)
-   ((getenv "ANTHROPIC_API_KEY")
-    (getenv "ANTHROPIC_API_KEY"))
-   (t
-    ;; Try auth-source
-    (require 'auth-source)
-    (let ((auth (car (auth-source-search :host "anthropic.com"
-                                         :user "apikey"
-                                         :require '(:secret)))))
-      (when auth
-        (funcall (plist-get auth :secret)))))))
-
-(defun matisse--validate-setup ()
-  "Validate that Claude Code is properly set up."
-  (unless (executable-find matisse-claude-code-path)
-    (error "Claude Code executable not found at: %s" matisse-claude-code-path))
-  (unless (matisse--get-api-key)
-    (error "No API key configured. Set `matisse-api-key' or use auth-source")))
-
-(defun matisse--generate-hook-settings ()
-  "Generate Claude Code hooks settings JSON for permission handling.
-Returns a JSON string configuring PreToolUse and PostToolUse hooks."
-  (let* ((matisse-file (locate-library "matisse"))
-         ;; If it's a symlink, get the real path
-         (matisse-real-file (if matisse-file
-                               (file-truename matisse-file)
-                             (error "Cannot locate matisse.el")))
-         (matisse-dir (file-name-directory matisse-real-file))
-         (wrapper-path (expand-file-name "matisse-hook-wrapper.sh" matisse-dir)))
-    ;; Check if wrapper script exists
-    (unless (file-exists-p wrapper-path)
-      (error "Matisse hook wrapper script not found at: %s
-Please ensure matisse-hook-wrapper.sh is in the same directory as matisse.el" wrapper-path))
-    ;; Check if wrapper script is executable
-    (unless (file-executable-p wrapper-path)
-      (error "Matisse hook wrapper script is not executable: %s
-Please run: chmod +x %s" wrapper-path wrapper-path))
-    (let* ((pretool-command (format "%s pretooluse" wrapper-path))
-           (posttool-command (format "%s posttooluse" wrapper-path))
-           (pretool-hook
-            (vector
-             (list (cons 'matcher "")
-                   (cons 'hooks
-                         (vector
-                          (list (cons 'type "command")
-                                (cons 'command pretool-command)
-                                (cons 'timeout 30)))))))
-           (posttool-hook
-            (vector
-             (list (cons 'matcher "")
-                   (cons 'hooks
-                         (vector
-                          (list (cons 'type "command")
-                                (cons 'command posttool-command)
-                                (cons 'timeout 30)))))))
-           (settings
-            `((hooks . ((PreToolUse . ,pretool-hook)
-                       (PostToolUse . ,posttool-hook))))))
-      (json-encode settings))))
-
-;;; Hook handlers for Claude Code permission system
-
-(defvar matisse--pending-tool-requests (make-hash-table :test 'equal)
-  "Hash table storing pending tool requests by buffer name.")
-
-(defun matisse-handle-pretooluse-hook (json-data)
-  "Handle PreToolUse hook from Claude Code.
-This is called by emacsclient when Claude wants to use a tool.
-JSON-DATA is the JSON string passed from Claude Code via stdin.
-Returns a JSON response with permission decision."
-  (condition-case err
-      (let* ((json-obj (json-read-from-string json-data))
-             ;; Claude Code uses snake_case not camelCase
-             (tool-name (or (alist-get 'tool_name json-obj)
-                           (alist-get 'toolName json-obj)))
-             (tool-input (or (alist-get 'tool_input json-obj)
-                            (alist-get 'toolInput json-obj)))
-             (decision (matisse--decide-tool-permission tool-name tool-input)))
-
-        ;; Log the hook event
-        (matisse--debug-log "PreToolUse hook: tool=%s, decision=%s"
-                          tool-name decision)
-
-        ;; Return JSON response
-        (json-encode
-         `((hookSpecificOutput . ((hookEventName . "PreToolUse")
-                                 (permissionDecision . ,decision)
-                                 (permissionDecisionReason . ,(if (string= decision "allow")
-                                                                 "Approved by Matisse"
-                                                               "Denied by Matisse")))))))
-    (error
-     ;; On error, allow the tool to avoid blocking Claude
-     (ignore-errors  ; Suppress any message errors
-       (message "Matisse hook error: %s" (error-message-string err)))
-     (json-encode
-      `((hookSpecificOutput . ((hookEventName . "PreToolUse")
-                              (permissionDecision . "allow")
-                              (permissionDecisionReason . "Error in hook, allowing by default"))))))))
-
-(defun matisse-handle-posttooluse-hook (json-data)
-  "Handle PostToolUse hook from Claude Code.
-This is called by emacsclient after Claude uses a tool.
-JSON-DATA is the JSON string passed from Claude Code via stdin."
-  (when json-data
-    (condition-case err
-        (let* ((json-obj (json-read-from-string json-data))
-               ;; Claude Code passes tool_name and tool_output (with underscores)
-               (tool-name (or (alist-get 'tool_name json-obj)
-                             (alist-get 'toolName json-obj)))
-               (_tool-output (or (alist-get 'tool_output json-obj)
-                                (alist-get 'toolOutput json-obj))))
-          (matisse--debug-log "PostToolUse hook: tool=%s" tool-name))
-      (error
-       (message "Matisse post-hook error: %s" (error-message-string err)))))
-  ;; Return empty JSON response
-  (json-encode '((hookSpecificOutput . nil))))
-
-(defun matisse--decide-tool-permission (tool-name tool-input)
-  "Decide whether to allow TOOL-NAME with TOOL-INPUT.
-Returns \"allow\" or \"deny\"."
-  ;; For now, implement a simple allow-list approach
-  ;; You can make this more sophisticated with user prompts
-  (cond
-   ;; Always allow read-only tools
-   ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
+   ;; If in bypass mode, allow everything
+   ((string= (or matisse--current-permission-mode matisse-permission-mode) "bypassPermissions")
     "allow")
 
-   ;; Ask user for dangerous commands
-   ((string= tool-name "Bash")
-    (if (matisse--prompt-for-bash-permission tool-input)
-        "allow"
-      "deny"))
+   ;; Always allow read-only tools and ExitPlanMode
+   ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool" "ExitPlanMode"))
+    "allow")
 
-   ;; Ask for file modifications
-   ((member tool-name '("Write" "Edit" "MultiEdit"))
-    (if (matisse--prompt-for-file-permission tool-name tool-input)
-        "allow"
-      "deny"))
-
-   ;; Default to asking
+   ;; Use simple y-or-n-p for other tools
    (t
-    (let* ((prompt (format "Allow %s tool? (y/n): " tool-name))
-           (char (read-char-choice prompt '(?y ?n ?Y ?N))))
-      (if (memq char '(?y ?Y))
-          "allow"
-        "deny")))))
+    ;; Display permission request in the shell buffer first
+    (when buffer-name
+      (let ((buffer (get-buffer buffer-name)))
+        (when buffer
+          (with-current-buffer buffer
+            (let ((insert-pos (matisse--get-current-response-position)))
+              (save-excursion
+                (goto-char insert-pos)
+                (let* ((inhibit-read-only t)
+                       (icon (matisse--get-icon :permission))
+                       (permission-text (cond
+                                         ((string= tool-name "Bash")
+                                          (let* ((command (alist-get 'command tool-input))
+                                                 (truncated-command (if (and (not matisse-verbose-mode)
+                                                                            (> (length command) 40))
+                                                                       (concat (substring command 0 40) "[…]")
+                                                                     command)))
+                                            (format "\n%sPermission Request: Claude wants to run command:\n  %s\n"
+                                                    icon truncated-command)))
+                                         ((member tool-name '("Write" "Edit" "MultiEdit"))
+                                          (let ((file-path (or (alist-get 'file_path tool-input)
+                                                               (alist-get 'path tool-input))))
+                                            (format "\n%sPermission Request: Claude wants to %s:\n  %s\n"
+                                                    icon (downcase tool-name) file-path)))
+                                         (t
+                                          (format "\n%sPermission Request: Claude wants to use %s tool\n"
+                                                  icon tool-name)))))
+                  (insert permission-text)
+                  ;; Update the response-end marker if we have one
+                  (when (and (boundp 'matisse--current-message-id)
+                             matisse--current-message-id
+                             (boundp 'matisse--response-sections)
+                             matisse--response-sections)
+                    (let ((section (gethash matisse--current-message-id matisse--response-sections)))
+                      (when section
+                        (let ((response-end (plist-get section :response-end)))
+                          (when (markerp response-end)
+                            (set-marker response-end (point))))))))))))))
 
-(defun matisse--prompt-for-bash-permission (tool-input)
-  "Prompt user to approve Bash command with TOOL-INPUT."
-  (let ((command (alist-get 'command tool-input)))
-    ;; Suppress server connection errors during prompt
-    (with-demoted-errors "Server connection warning: %S"
-      ;; Use read-char-choice for robust input handling
-      (let* ((prompt (format "Allow command: %s? (y/n): " command))
-             (char (read-char-choice prompt '(?y ?n ?Y ?N))))
-        (memq char '(?y ?Y))))))
+    ;; Now prompt in minibuffer
+    (let* ((prompt (cond
+                    ((string= tool-name "Bash")
+                     (let* ((command (alist-get 'command tool-input))
+                            (truncated-command (if (and (not matisse-verbose-mode)
+                                                       (> (length command) 40))
+                                                  (concat (substring command 0 40) "[…]")
+                                                command)))
+                       (format "Allow command: %s? " truncated-command)))
+                    ((member tool-name '("Write" "Edit" "MultiEdit"))
+                     (let ((file-path (or (alist-get 'file_path tool-input)
+                                          (alist-get 'path tool-input))))
+                       (format "Allow %s on %s? " (downcase tool-name) file-path)))
+                    (t
+                     (format "Allow %s tool? " tool-name))))
+           (decision (if (y-or-n-p prompt) "allow" "deny")))
 
-(defun matisse--prompt-for-file-permission (tool-name tool-input)
-  "Prompt user to approve file operation TOOL-NAME with TOOL-INPUT."
-  (let ((file-path (or (alist-get 'file_path tool-input)
-                        (alist-get 'path tool-input))))
-    ;; Suppress server connection errors during prompt
-    (with-demoted-errors "Server connection warning: %S"
-      ;; Use read-char-choice for robust input handling
-      (let* ((prompt (format "Allow %s on %s? (y/n): " tool-name file-path))
-             (char (read-char-choice prompt '(?y ?n ?Y ?N))))
-        (memq char '(?y ?Y))))))
+      ;; Clear minibuffer message
+      (message nil)
 
-;;; Progress context parsing and formatting
+      ;; Log decision if buffer available
+      (when buffer-name
+        (matisse--log-permission-decision buffer-name tool-name decision))
+
+      decision))))
+
+(defun matisse--decide-tool-permission-with-suggestions (tool-name tool-input suggestions buffer-name)
+  "Decide permission with optional suggestions for \\='always allow\\='.
+TOOL-NAME is the tool being requested.
+TOOL-INPUT is the input to the tool.
+SUGGESTIONS is the permission_suggestions array from Claude.
+BUFFER-NAME is the matisse shell buffer.
+Returns a cons cell: (decision . updated-permissions) where decision
+is \"allow\" or \"deny\" and updated-permissions is nil or the
+suggestions array."
+  (cond
+   ;; If in bypass mode, allow everything
+   ((string= (or matisse--current-permission-mode matisse-permission-mode) "bypassPermissions")
+    (cons "allow" nil))
+
+   ;; Always allow read-only tools and ExitPlanMode
+   ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool" "ExitPlanMode"))
+    (cons "allow" nil))
+
+   ;; For write tools, check if we have acceptEdits suggestion
+   (t
+    ;; Check if suggestions include setMode to acceptEdits
+    (let* ((has-accept-edits-suggestion
+            (and (vectorp suggestions)
+                 (cl-some (lambda (suggestion)
+                            (let ((type-val (alist-get 'type suggestion))
+                                  (mode-val (alist-get 'mode suggestion)))
+                              (and (equal type-val "setMode")
+                                   (equal mode-val "acceptEdits"))))
+                          suggestions))))
+
+      ;; Display permission request in the shell buffer first
+      (when buffer-name
+        (let ((buffer (get-buffer buffer-name)))
+          (when buffer
+            (with-current-buffer buffer
+              (let ((insert-pos (matisse--get-current-response-position)))
+                (save-excursion
+                  (goto-char insert-pos)
+                  (let* ((inhibit-read-only t)
+                         (icon (matisse--get-icon :permission))
+                         (permission-text (cond
+                                           ((string= tool-name "Bash")
+                                            (let* ((command (alist-get 'command tool-input))
+                                                   (truncated-command (if (and (not matisse-verbose-mode)
+                                                                              (> (length command) 40))
+                                                                         (concat (substring command 0 40) "[…]")
+                                                                       command)))
+                                              (format "\n%sPermission Request: Claude wants to run command:\n  %s\n"
+                                                      icon truncated-command)))
+                                           ((member tool-name '("Write" "Edit" "MultiEdit"))
+                                            (let ((file-path (or (alist-get 'file_path tool-input)
+                                                                 (alist-get 'path tool-input))))
+                                              (format "\n%sPermission Request: Claude wants to %s:\n  %s\n"
+                                                      icon (downcase tool-name) file-path)))
+                                           (t
+                                            (format "\n%sPermission Request: Claude wants to use %s tool\n"
+                                                    icon tool-name)))))
+                    (insert permission-text)
+                    ;; Update the response-end marker if we have one
+                    (when (and (boundp 'matisse--current-message-id)
+                               matisse--current-message-id
+                               (boundp 'matisse--response-sections)
+                               matisse--response-sections)
+                      (let ((section (gethash matisse--current-message-id matisse--response-sections)))
+                        (when section
+                          (let ((response-end (plist-get section :response-end)))
+                            (when (markerp response-end)
+                              (set-marker response-end (point))))))))))))))
+
+      ;; Now prompt in minibuffer with extended options if suggestions available
+      (let* ((prompt-base (cond
+                           ((string= tool-name "Bash")
+                            (let* ((command (alist-get 'command tool-input))
+                                   (truncated-command (if (and (not matisse-verbose-mode)
+                                                              (> (length command) 40))
+                                                         (concat (substring command 0 40) "[…]")
+                                                       command)))
+                              (format "Allow command: %s? " truncated-command)))
+                           ((member tool-name '("Write" "Edit" "MultiEdit"))
+                            (let ((file-path (or (alist-get 'file_path tool-input)
+                                                 (alist-get 'path tool-input))))
+                              (format "Allow %s on %s? " (downcase tool-name) file-path)))
+                           (t
+                            (format "Allow %s tool? " tool-name))))
+             (response (condition-case nil
+                          (if has-accept-edits-suggestion
+                              ;; Use read-char-choice for y/a/n prompt with proper formatting
+                              (let* ((prompt-formatted (concat prompt-base
+                                                              "("
+                                                              (propertize "y" 'face 'help-key-binding)
+                                                              "es, "
+                                                              (propertize "a" 'face 'help-key-binding)
+                                                              "lways, "
+                                                              (propertize "n" 'face 'help-key-binding)
+                                                              "o) "))
+                                     (char (read-char-choice prompt-formatted '(?y ?Y ?a ?A ?n ?N))))
+                                (cond
+                                 ((memq char '(?y ?Y)) 'yes)
+                                 ((memq char '(?a ?A)) 'always)
+                                 ((memq char '(?n ?N)) 'no)))
+                            ;; Use standard y-or-n-p
+                            (if (y-or-n-p prompt-base) 'yes 'no))
+                        ;; Handle C-g (quit) as denial
+                        (quit 'no)))
+             (decision (if (eq response 'no) "deny" "allow"))
+             (updated-permissions (if (eq response 'always) suggestions nil)))
+
+        ;; If user chose "always", switch to bypassPermissions mode in the shell buffer
+        (when (eq response 'always)
+          (when-let* ((shell-buffer (get-buffer buffer-name)))
+            (with-current-buffer shell-buffer
+              (setq matisse--current-permission-mode "bypassPermissions")
+              (matisse--update-mode-line))))
+
+        ;; Clear minibuffer message
+        (message nil)
+
+        ;; Log decision if buffer available
+        (when buffer-name
+          (matisse--log-permission-decision buffer-name tool-name decision))
+
+        (cons decision updated-permissions))))))
+
+;;;; In-Buffer Permission Prompts
+(defun matisse--find-string-line-number (file-path search-string)
+  "Find the starting line number of SEARCH-STRING in FILE-PATH.
+Returns the 1-indexed line number where SEARCH-STRING starts, or nil
+if not found.  If the file does not exist, returns nil."
+  (when (and file-path (file-exists-p file-path))
+    (condition-case nil
+        (with-temp-buffer
+          (insert-file-contents file-path)
+          (goto-char (point-min))
+          (when (search-forward search-string nil t)
+            ;; Found it - calculate line number at the start of the match
+            (line-number-at-pos (match-beginning 0))))
+      (error nil))))
+
+(defun matisse--create-edit-diff (file-path old-string new-string)
+  "Create a syntax-highlighted diff for Edit tool permission prompt.
+FILE-PATH is the path to the file being edited.
+OLD-STRING is the text to be replaced.
+NEW-STRING is the replacement text.
+Returns a propertized string with diff highlighting."
+  (let ((old-temp-buffer (generate-new-buffer " *matisse-diff-old*"))
+        (new-temp-buffer (generate-new-buffer " *matisse-diff-new*"))
+        (diff-buffer (generate-new-buffer " *matisse-diff*")))
+    (unwind-protect
+        (progn
+          ;; Fill the old temp buffer
+          (with-current-buffer old-temp-buffer
+            (insert old-string)
+            (set-buffer-modified-p nil))
+
+          ;; Fill the new temp buffer
+          (with-current-buffer new-temp-buffer
+            (insert new-string)
+            (set-buffer-modified-p nil))
+
+          ;; Create the diff
+          (let ((switches `("-u"
+                            "--label" ,(shell-quote-argument (concat "a/" (file-name-nondirectory file-path)))
+                            "--label" ,(shell-quote-argument (concat "b/" (file-name-nondirectory file-path))))))
+
+            ;; Generate diff with dynamic bindings for diff-mode variables
+            (let ((diff-font-lock-syntax 'hunk-also)
+                  (diff-font-lock-prettify t)
+                  (diff-use-labels nil))
+              (diff-no-select old-temp-buffer new-temp-buffer switches t diff-buffer)
+
+              ;; Configure and fontify the diff buffer
+              (with-current-buffer diff-buffer
+                (setq default-directory (file-name-directory file-path))
+                (setq-local diff-vc-backend nil)
+                (setq-local diff-default-directory default-directory)
+                (setq-local diff-font-lock-syntax 'hunk-also)
+                (diff-mode)
+                (font-lock-ensure)
+
+                ;; Clean up and enhance diff output
+                (let ((inhibit-read-only t))
+                  (goto-char (point-min))
+                  ;; Remove the "diff -u" command line at the start
+                  (when (re-search-forward "^diff -u .*\n" nil t)
+                    (delete-region (match-beginning 0) (match-end 0)))
+                  ;; Remove the --- and +++ file headers
+                  (goto-char (point-min))
+                  (when (re-search-forward "^--- .*\n" nil t)
+                    (delete-region (match-beginning 0) (match-end 0)))
+                  (goto-char (point-min))
+                  (when (re-search-forward "^\\+\\+\\+ .*\n" nil t)
+                    (delete-region (match-beginning 0) (match-end 0)))
+                  ;; Remove hunk headers (@@...@@) since line numbers are relative to fragments, not file
+                  (goto-char (point-min))
+                  (while (re-search-forward "^@@.*@@.*\n" nil t)
+                    (delete-region (match-beginning 0) (match-end 0)))
+                  ;; Remove the "Diff finished" footer message
+                  (goto-char (point-min))
+                  (when (re-search-forward "^Diff finished\\..*\n" nil t)
+                    (delete-region (match-beginning 0) (match-end 0)))
+
+                  ;; Add line numbers if we can find the starting line
+                  (when-let* ((start-line (matisse--find-string-line-number file-path old-string)))
+                    (goto-char (point-min))
+                    (let ((current-line start-line))
+                      (while (not (eobp))
+                        (cond
+                         ;; Lines starting with '-' or ' ' (context): show line number
+                         ((looking-at "^[-  ]")
+                          (insert (propertize (format "%4d │ " current-line) 'face 'shadow))
+                          (setq current-line (1+ current-line)))
+                         ;; Lines starting with '+': show blank space
+                         ((looking-at "^\\+")
+                          (insert (propertize "     │ " 'face 'shadow)))
+                         ;; Other lines: no line number
+                         (t nil))
+                        (forward-line 1))))
+
+                  ;; Add file header and separators
+                  (goto-char (point-min))
+                  (let* ((separator (make-string 60 ?━))
+                         (relative-path (if (file-name-absolute-p file-path)
+                                           (file-relative-name file-path default-directory)
+                                         file-path)))
+                    ;; Insert top separator
+                    (insert (propertize separator 'face 'shadow) "\n")
+                    ;; Insert filename
+                    (insert (propertize relative-path 'face 'bold) "\n")
+                    ;; Insert separator before diff content
+                    (insert (propertize separator 'face 'shadow) "\n")
+                    ;; Add bottom separator at the end
+                    (goto-char (point-max))
+                    (unless (bolp)
+                      (insert "\n"))
+                    (insert (propertize separator 'face 'shadow))))
+
+                ;; Return the propertized diff content
+                (buffer-string)))))
+
+      ;; Clean up temporary buffers
+      (when (buffer-live-p old-temp-buffer)
+        (kill-buffer old-temp-buffer))
+      (when (buffer-live-p new-temp-buffer)
+        (kill-buffer new-temp-buffer))
+      (when (buffer-live-p diff-buffer)
+        (kill-buffer diff-buffer)))))
+
+(defun matisse--format-permission-prompt (tool-name tool-input suggestions)
+  "Format permission prompt message for in-buffer display.
+TOOL-NAME is the name of the tool requesting permission.
+TOOL-INPUT is the input parameters for the tool.
+SUGGESTIONS is the permission_suggestions array from Claude.
+Returns a formatted prompt string."
+  (let* ((icon (matisse--get-icon :permission))
+         ;; Check if acceptEdits suggestion is present
+         (has-accept (and (vectorp suggestions)
+                         (cl-some (lambda (s)
+                                   (and (equal (alist-get 'type s) "setMode")
+                                        (equal (alist-get 'mode s) "acceptEdits")))
+                                 suggestions)))
+         ;; Format options with instructions to press RETURN
+         (options (if has-accept
+                     (concat "Type "
+                             (propertize "y" 'face 'help-key-binding)
+                             "es, "
+                             (propertize "n" 'face 'help-key-binding)
+                             "o, or "
+                             (propertize "a" 'face 'help-key-binding)
+                             "ccept and press RETURN:")
+                   (concat "Type "
+                           (propertize "y" 'face 'help-key-binding)
+                           "es or "
+                           (propertize "n" 'face 'help-key-binding)
+                           "o and press RETURN:"))))
+
+    ;; Handle Edit tool specially with diff display
+    (if (string= tool-name "Edit")
+        (let* ((file-path (alist-get 'file_path tool-input))
+               (old-string (alist-get 'old_string tool-input))
+               (new-string (alist-get 'new_string tool-input))
+               (diff-text (matisse--create-edit-diff file-path old-string new-string)))
+          (format "%sEdit %s?\n\n%s\n%s\n" icon file-path diff-text options))
+
+      ;; Other tools - use simple format
+      (let ((action (cond
+                     ((string= tool-name "Bash")
+                      (let ((command (alist-get 'command tool-input)))
+                        (format "Run command: %s" command)))
+                     ((string= tool-name "Write")
+                      (format "Write file: %s" (alist-get 'file_path tool-input)))
+                     ((string= tool-name "MultiEdit")
+                      "Edit multiple files")
+                     (t (format "Use %s tool" tool-name)))))
+        (format "%s%s?\n%s\n" icon action options)))))
+
+(defun matisse--prompt-permission-in-buffer (process request-id tool-name tool-input suggestions)
+  "Show permission prompt in buffer and wait for user response.
+PROCESS is the Claude Code process.
+REQUEST-ID is the control request identifier.
+TOOL-NAME is the name of the tool requesting permission.
+TOOL-INPUT is the input parameters for the tool.
+SUGGESTIONS is the permission_suggestions array from Claude."
+  (matisse--debug-log "IN-BUFFER PERMISSION: Prompting for %s (id=%s)" tool-name request-id)
+
+  ;; Stop the spinner animation while waiting for permission
+  (when matisse--spinner-timer
+    (cancel-timer matisse--spinner-timer)
+    (setq matisse--spinner-timer nil))
+
+  ;; Store pending request with current buffer
+  (setq matisse--pending-permission-request
+        (list (current-buffer) process request-id tool-name tool-input suggestions))
+
+  ;; Update mode-line to show permission icon
+  (matisse--update-mode-line)
+
+  ;; Insert permission prompt at current response position (as part of Claude's output)
+  (let ((inhibit-read-only t))
+    (save-excursion
+      ;; Get the position where Claude's response is being written
+      (let ((insert-pos (matisse--get-current-response-position)))
+        (goto-char insert-pos)
+
+        ;; Ensure we're on a new line
+        (unless (bolp)
+          (insert "\n"))
+        (insert "\n")
+
+        ;; Insert permission request
+        (let ((prompt-text (matisse--format-permission-prompt tool-name tool-input suggestions))
+              (start-pos (point)))
+          (insert prompt-text)
+
+          ;; Make permission text read-only
+          (put-text-property start-pos (point) 'read-only t)
+          (put-text-property start-pos (point) 'rear-nonsticky '(read-only))
+
+          ;; Update the response-end marker to after our insertion
+          (when (and (boundp 'matisse--current-message-id)
+                     matisse--current-message-id
+                     (boundp 'matisse--response-sections)
+                     matisse--response-sections)
+            (let ((section (gethash matisse--current-message-id matisse--response-sections)))
+              (when section
+                (let ((response-end (plist-get section :response-end)))
+                  (when (markerp response-end)
+                    (set-marker response-end (point)))))))))))
+
+  ;; Force immediate scroll to show permission prompt
+  (matisse--auto-scroll-if-at-end t (current-buffer) t))
+
+(defun matisse--process-permission-response (process request-id tool-name tool-input suggestions response)
+  "Process permission RESPONSE for TOOL-NAME.
+PROCESS is the Claude Code process.
+REQUEST-ID is the control request identifier.
+TOOL-INPUT is the tool input parameters.
+SUGGESTIONS is the permission suggestions array.
+RESPONSE is the user's response string."
+  (let ((decision (pcase response
+                    ("yes" "allow")
+                    ("no" "deny")
+                    ("accept" "allow")
+                    (_ nil))))
+
+    (when decision
+      ;; If user chose "accept", switch to bypassPermissions mode in process buffer
+      (when (string= response "accept")
+        (when-let* ((proc-buffer (process-buffer process)))
+          (with-current-buffer proc-buffer
+            (setq matisse--current-permission-mode "bypassPermissions")
+            (matisse--update-mode-line))))
+
+      ;; Show decision in buffer
+      (matisse--show-permission-decision decision tool-name)
+
+      ;; Send control response
+      (let* ((updated-permissions (when (string= response "accept") suggestions))
+             (response-data (if (string= decision "allow")
+                               (let ((base-response `((behavior . "allow")
+                                                     (updatedInput . ,tool-input))))
+                                 ;; Include updatedPermissions from "accept" choice
+                                 (when updated-permissions
+                                   (setq base-response (append base-response `((updatedPermissions . ,updated-permissions)))))
+                                 ;; Also include pending permission mode update if user cycled mode
+                                 (when matisse--pending-permission-update
+                                   (setq base-response (append base-response
+                                                              `((updatedPermissions . ((permissionMode . ,matisse--pending-permission-update))))))
+                                   (setq matisse--pending-permission-update nil))
+                                 base-response)
+                             `((behavior . "deny")
+                               (message . "User denied permission")
+                               (interrupt . t)))))
+        (matisse--debug-log "IN-BUFFER PERMISSION: Sending control response: %s" decision)
+        (matisse--send-control-response process request-id response-data)))))
+
+(defun matisse--handle-permission-response (response)
+  "Process user RESPONSE to pending permission request.
+RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')."
+  (matisse--debug-log "IN-BUFFER PERMISSION: Got response: %s" response)
+
+  (if (not matisse--pending-permission-request)
+      (error "No pending permission request")
+
+    (let ((response-trimmed (string-trim (downcase response))))
+      ;; Check if user wants to exit
+      (if (member response-trimmed matisse-exit-commands)
+          (progn
+            (matisse--debug-log "IN-BUFFER PERMISSION: Exit command detected")
+            ;; Clear pending request
+            (setq matisse--pending-permission-request nil)
+            ;; Exit matisse
+            (when (fboundp 'matisse-quit)
+              (matisse-quit)))
+
+        ;; Handle normal permission response
+        (pcase-let ((`(,_buffer ,process ,request-id ,tool-name ,tool-input ,suggestions)
+                     matisse--pending-permission-request))
+
+          (matisse--debug-log "IN-BUFFER PERMISSION: Processing response for %s (id=%s)" tool-name request-id)
+
+          ;; Check if accept is valid for this request
+          ;; Map abbreviations to full words and validate response
+          (let* ((has-accept (and (vectorp suggestions)
+                                 (cl-some (lambda (s)
+                                           (and (equal (alist-get 'type s) "setMode")
+                                                (equal (alist-get 'mode s) "acceptEdits")))
+                                         suggestions)))
+                 ;; Normalize response: map abbreviations to full words
+                 (normalized-response (pcase response-trimmed
+                                       ((or "y" "yes") "yes")
+                                       ((or "n" "no") "no")
+                                       ((or "a" "accept") "accept")
+                                       (_ response-trimmed)))
+                 (decision (pcase normalized-response
+                             ("yes" "allow")
+                             ("no" "deny")
+                             ("accept" (if has-accept "allow" nil))
+                             (_ nil))))
+
+            (matisse--debug-log "IN-BUFFER PERMISSION: Decision=%s for response=%s" decision response-trimmed)
+
+            (if decision
+                (progn
+                  ;; Clear pending request FIRST to prevent re-entry
+                  (matisse--debug-log "IN-BUFFER PERMISSION: Clearing pending request")
+                  (setq matisse--pending-permission-request nil)
+
+                  ;; Clear input line
+                  (let ((inhibit-read-only t)
+                        (prompt-start (save-excursion
+                                       (goto-char (point-max))
+                                       (when (re-search-backward matisse--shell-prompt-regex nil t)
+                                         (line-beginning-position))))
+                        (input-end (point-max)))
+                    (when prompt-start
+                      (delete-region prompt-start input-end)))
+
+                  ;; If user chose "accept", switch to bypassPermissions mode
+                  (when (string= normalized-response "accept")
+                    (setq matisse--current-permission-mode "bypassPermissions")
+                    (matisse--update-mode-line))
+
+                  ;; Show decision in buffer
+                  (matisse--show-permission-decision decision tool-name)
+
+                  ;; Send control response
+                  (let* ((updated-permissions (when (string= normalized-response "accept") suggestions))
+                     (response-data (if (string= decision "allow")
+                                       (let ((base-response `((behavior . "allow")
+                                                             (updatedInput . ,tool-input))))
+                                         (if updated-permissions
+                                             (append base-response `((updatedPermissions . ,updated-permissions)))
+                                           base-response))
+                                     `((behavior . "deny")
+                                       (message . "User denied permission")
+                                       (interrupt . t)))))
+                (matisse--debug-log "IN-BUFFER PERMISSION: Sending control response: %s" decision)
+                (matisse--send-control-response process request-id response-data)
+
+                ;; Update animation state based on decision
+                (if (string= decision "allow")
+                    ;; Restart the spinner animation after permission is granted
+                    (matisse--start-spinner)
+                  ;; Stop animation and clear waiting state on denial
+                  (setq matisse--waiting-for-response nil)
+                  (matisse--stop-spinner)))
+
+              ;; Insert new prompt
+              (matisse--debug-log "IN-BUFFER PERMISSION: Inserting new prompt")
+              (matisse--insert-prompt)
+              (matisse--debug-log "IN-BUFFER PERMISSION: Done handling response"))
+
+              ;; Invalid response - show error and keep waiting
+              (message (if has-accept
+                          "Invalid response. Type 'yes', 'no', or 'accept'"
+                        "Invalid response. Type 'yes' or 'no'")))))))))
+
+(defun matisse--show-permission-decision (decision _tool-name)
+  "Show permission DECISION for TOOL-NAME in buffer.
+DECISION is either \"allow\" or \"deny\".
+TOOL-NAME is the name of the tool that was allowed or denied."
+  (let ((inhibit-read-only t)
+        (icon (if (string= decision "allow")
+                 (matisse--get-icon :allow)
+                (matisse--get-icon :deny)))
+        (text (if (string= decision "allow") "Allowed" "Denied"))
+        (insert-pos (matisse--get-current-response-position)))
+    (save-excursion
+      (goto-char insert-pos)
+      (unless (bolp) (insert "\n"))
+      (let ((start-pos (point)))
+        (insert (format "  → %s%s\n" icon text))
+        (put-text-property start-pos (point) 'read-only t)
+        ;; Update response-end marker
+        (when (and (boundp 'matisse--current-message-id)
+                   matisse--current-message-id
+                   (boundp 'matisse--response-sections)
+                   matisse--response-sections)
+          (let ((section (gethash matisse--current-message-id matisse--response-sections)))
+            (when section
+              (let ((response-end (plist-get section :response-end)))
+                (when (markerp response-end)
+                  (set-marker response-end (point)))))))))))
+
+;;;; Icon & Formatting Functions
 (defun matisse--at-end-of-line-p ()
   "Check if the shell buffer position is at end of line.
 Returns t if the buffer is empty or if we're looking at a newline."
@@ -978,73 +1946,93 @@ COLOR-FACE is an optional face to apply for coloring (used with nerd icons)."
     (let ((styled-icon (copy-sequence icon-string))
           (face-props `(:height ,matisse-icons-scale-factor)))
       ;; If a color face is provided and we're using nerd icons, inherit from it
-      (when (and color-face (eq matisse-progress-icons-mode 'nerd-icons))
+      (when (and color-face (eq matisse-icons-mode 'nerd-icons))
         (setq face-props `(:height ,matisse-icons-scale-factor :inherit ,color-face)))
       (put-text-property 0 (length styled-icon) 'font-lock-face face-props styled-icon)
       styled-icon)))
 
-(defun matisse--get-tool-icon (tool-name)
-  "Get the appropriate icon for TOOL-NAME based on current icon mode."
-  (pcase matisse-progress-icons-mode
-    ('emoji
-     (let ((icon (pcase tool-name
-                   ("Read" matisse-emoji-icon-read)
-                   ("Write" matisse-emoji-icon-write)
-                   ("Edit" matisse-emoji-icon-edit)
-                   ("MultiEdit" matisse-emoji-icon-multiedit)
-                   ("Bash" matisse-emoji-icon-bash)
-                   ("Grep" matisse-emoji-icon-grep)
-                   ("Glob" matisse-emoji-icon-glob)
-                   ("Task" matisse-emoji-icon-task)
-                   ("WebFetch" matisse-emoji-icon-webfetch)
-                   ("TodoWrite" matisse-emoji-icon-todowrite)
-                   (_ matisse-emoji-icon-default))))
-       (concat (matisse--apply-icon-face-properties icon) " ")))
-    ('nerd-icons
-     (let ((icon-and-face (pcase tool-name
-                            ("Read" (cons matisse-nerd-icon-read matisse-nerd-icon-read-face))
-                            ("Write" (cons matisse-nerd-icon-write matisse-nerd-icon-write-face))
-                            ("Edit" (cons matisse-nerd-icon-edit matisse-nerd-icon-edit-face))
-                            ("MultiEdit" (cons matisse-nerd-icon-multiedit matisse-nerd-icon-multiedit-face))
-                            ("Bash" (cons matisse-nerd-icon-bash matisse-nerd-icon-bash-face))
-                            ("Grep" (cons matisse-nerd-icon-grep matisse-nerd-icon-grep-face))
-                            ("Glob" (cons matisse-nerd-icon-glob matisse-nerd-icon-glob-face))
-                            ("Task" (cons matisse-nerd-icon-task matisse-nerd-icon-task-face))
-                            ("WebFetch" (cons matisse-nerd-icon-webfetch matisse-nerd-icon-webfetch-face))
-                            ("TodoWrite" (cons matisse-nerd-icon-todowrite matisse-nerd-icon-todowrite-face))
-                            (_ (cons matisse-nerd-icon-default matisse-nerd-icon-default-face)))))
-       (concat (matisse--apply-icon-face-properties (car icon-and-face) (cdr icon-and-face)) " ")))
-    ('ascii "- ")
-    (_ "")))
+(defun matisse--get-icon-data (icon-type &optional tool-name)
+  "Get icon data for ICON-TYPE.
+For :tool icons, TOOL-NAME specifies which tool.
+Returns list: (emoji-icon nerd-icon nerd-face ascii-text)."
+  (pcase icon-type
+    (:tool
+     (pcase tool-name
+       ("Read" (list matisse-emoji-icon-read matisse-nerd-icon-read
+                     matisse-nerd-icon-read-face "- "))
+       ("Write" (list matisse-emoji-icon-write matisse-nerd-icon-write
+                      matisse-nerd-icon-write-face "- "))
+       ("Edit" (list matisse-emoji-icon-edit matisse-nerd-icon-edit
+                     matisse-nerd-icon-edit-face "- "))
+       ("Bash" (list matisse-emoji-icon-bash matisse-nerd-icon-bash
+                     matisse-nerd-icon-bash-face "- "))
+       ("Grep" (list matisse-emoji-icon-grep matisse-nerd-icon-grep
+                     matisse-nerd-icon-grep-face "- "))
+       ("Glob" (list matisse-emoji-icon-glob matisse-nerd-icon-glob
+                     matisse-nerd-icon-glob-face "- "))
+       ("Task" (list matisse-emoji-icon-task matisse-nerd-icon-task
+                     matisse-nerd-icon-task-face "- "))
+       ("WebFetch" (list matisse-emoji-icon-webfetch matisse-nerd-icon-webfetch
+                         matisse-nerd-icon-webfetch-face "- "))
+       ("TodoWrite" (list matisse-emoji-icon-todowrite matisse-nerd-icon-todowrite
+                          matisse-nerd-icon-todowrite-face "- "))
+       (_ (list matisse-emoji-icon-default matisse-nerd-icon-default
+                matisse-nerd-icon-default-face "- "))))
+    (:success
+     (list matisse-emoji-icon-success matisse-nerd-icon-success
+           matisse-nerd-icon-success-face "- "))
+    (:performance
+     (list matisse-emoji-icon-performance matisse-nerd-icon-performance
+           matisse-nerd-icon-performance-face "- "))
+    (:command
+     (list matisse-emoji-icon-command matisse-nerd-icon-command
+           matisse-nerd-icon-command-face ""))
+    (:permission
+     (list matisse-emoji-icon-permission matisse-nerd-icon-permission
+           matisse-nerd-icon-permission-face matisse-ascii-icon-permission))
+    (:allow
+     (list matisse-emoji-icon-allow matisse-nerd-icon-allow
+           matisse-nerd-icon-allow-face matisse-ascii-icon-allow))
+    (:deny
+     (list matisse-emoji-icon-deny matisse-nerd-icon-deny
+           matisse-nerd-icon-deny-face matisse-ascii-icon-deny))
+    (:prompt
+     (list matisse-emoji-shell-prompt matisse-nerd-shell-prompt
+           nil matisse-ascii-shell-prompt))))
 
-(defun matisse--get-success-icon ()
-  "Get the appropriate success icon based on current icon mode."
-  (pcase matisse-progress-icons-mode
-    ('emoji (concat (matisse--apply-icon-face-properties matisse-emoji-icon-success) " "))
-    ('nerd-icons (concat (matisse--apply-icon-face-properties matisse-nerd-icon-success matisse-nerd-icon-success-face) " "))
-    ('ascii "- ")
-    (_ "")))
+(defun matisse--get-icon (icon-type &optional tool-name)
+  "Get formatted icon for ICON-TYPE based on current icon mode.
+For :tool icons, TOOL-NAME specifies which tool.
+Icon types: :tool, :success, :performance, :command, :permission,
+:allow, :deny, :prompt."
+  (let ((icon-data (matisse--get-icon-data icon-type tool-name)))
+    (pcase matisse-icons-mode
+      ('emoji
+       (let ((icon (nth 0 icon-data)))
+         (concat (matisse--apply-icon-face-properties icon) " ")))
+      ('nerd-icons
+       (let ((icon (nth 1 icon-data))
+             (face (nth 2 icon-data)))
+         (concat (matisse--apply-icon-face-properties icon face) " ")))
+      ('ascii
+       (let ((text (nth 3 icon-data)))
+         (if (string-empty-p text) "" (concat text " "))))
+      (_ ""))))
 
-(defun matisse--get-performance-icon ()
-  "Get the appropriate performance icon based on current icon mode."
-  (pcase matisse-progress-icons-mode
-    ('emoji (concat (matisse--apply-icon-face-properties matisse-emoji-icon-performance) " "))
-    ('nerd-icons (concat (matisse--apply-icon-face-properties matisse-nerd-icon-performance matisse-nerd-icon-performance-face) " "))
-    ('ascii "- ")
-    (_ "")))
 
-(defun matisse--get-shell-prompt-character ()
-  "Get the appropriate shell prompt character based on current icon mode."
-  (pcase matisse-progress-icons-mode
-    ('emoji matisse-emoji-shell-prompt)
-    ('nerd-icons matisse-nerd-shell-prompt)
-    ('ascii matisse-ascii-shell-prompt)
-    (_ matisse-ascii-shell-prompt)))
+
+
+
+
+
+
 
 (defun matisse--format-progress-indicator (tool-name input-data)
   "Format a progress indicator for TOOL-NAME with INPUT-DATA."
-  (when matisse-show-progress-indicators
-    (let* ((icon (matisse--get-tool-icon tool-name))
+  (when (and matisse-show-progress-indicators
+             ;; Don't show progress for internal automatic tools
+             (not (equal tool-name "ExitPlanMode")))
+    (let* ((icon (matisse--get-icon :tool tool-name))
            (action (pcase tool-name
                      ("Read" "Reading")
                      ("Write" "Writing")
@@ -1084,19 +2072,19 @@ COLOR-FACE is an optional face to apply for coloring (used with nerd icons)."
      ;; Handle Edit/MultiEdit results that show file updates
      ((string-match "The file \\(.+\\) has been updated" result-content)
       (let ((file-path (match-string 1 result-content))
-            (icon (matisse--get-success-icon)))
+            (icon (matisse--get-icon :success)))
         (format "%sUpdated %s" icon (file-name-nondirectory file-path))))
 
      ;; Handle Write operations
      ((and (equal tool-name "Write")
            (string-match "file" result-content))
-      (let ((icon (matisse--get-success-icon)))
+      (let ((icon (matisse--get-icon :success)))
         ;; [TODO] sometimes this prints when file writing has not completed
         (format "%sFile written successfully" icon)))
 
      ;; Generic success for file operations
      ((member tool-name '("Edit" "MultiEdit" "Write"))
-      (let ((icon (matisse--get-success-icon)))
+      (let ((icon (matisse--get-icon :success)))
         (format "%sFile operation completed" icon))))))
 
 (defun matisse--format-performance-summary (result-data)
@@ -1106,7 +2094,7 @@ COLOR-FACE is an optional face to apply for coloring (used with nerd icons)."
            (cost (alist-get 'total_cost_usd result-data))
            (usage (alist-get 'usage result-data))
            (output-tokens (when usage (alist-get 'output_tokens usage)))
-           (icon (matisse--get-performance-icon))
+           (icon (matisse--get-icon :performance))
            (parts '()))
 
       (when duration
@@ -1141,8 +2129,8 @@ COLOR-FACE is an optional face to apply for coloring (used with nerd icons)."
                     (equal (alist-get 'type item) "tool_result"))
                   content)))))
 
-;;; Token tracking helpers
-
+;;; Process & Protocol
+;;;; Token Tracking
 (defun matisse--track-tokens (json-obj)
   "Track token usage from result messages.
 JSON-OBJ is the result message containing usage data."
@@ -1174,6 +2162,12 @@ JSON-OBJ is the result message containing usage data."
              "\n⚠️  Context is getting long (>50k tokens). Consider starting a fresh conversation.\n"))
   (message "Tip: Context is getting long. Consider starting a fresh conversation"))
 
+(defun matisse--reset-token-count ()
+  "Reset the tokens-since-compact counter."
+  (setq matisse--tokens-since-compact 0)
+  ;; Update mode line to reflect the reset
+  (force-mode-line-update))
+
 (defun matisse--format-token-status ()
   "Format token usage for mode line display."
   (when (and matisse-show-token-usage (> matisse--tokens-since-compact 0))
@@ -1183,18 +2177,14 @@ JSON-OBJ is the result message containing usage data."
                                       matisse-auto-compact-threshold))
                          0))
            (face (cond
-                  ((>= percentage 90) '(:foreground "red" :weight bold))
-                  ((>= percentage 70) '(:foreground "orange"))
-                  ((>= percentage 50) '(:foreground "yellow"))
-                  (t nil))))
+                  ((>= percentage 90) '(:inherit error :weight bold))
+                  ((>= percentage 70) 'warning)
+                  ((>= percentage 50) 'warning)
+                  (t 'shadow))))
       (propertize (format "[%dk]" tokens-k) 'face face))))
 
-;;; JSON handling
-
+;;;; JSON Protocol
 ;; Buffer-local variable to store pending images
-(defvar-local matisse--pending-images nil
-  "List of pending images to be included with the next message.
-Each element is a plist with :type, :data, and optionally :filename.")
 
 (defun matisse--add-pending-image (mime-type data &optional filename)
   "Add an image to the pending images list.
@@ -1216,33 +2206,314 @@ FILENAME is an optional filename hint."
     (message "Image added to next message%s"
              (if filename (format " (%s)" filename) ""))))
 
+(defun matisse--is-slash-command-p (text)
+  "Return non-nil if TEXT is a slash command."
+  (and (stringp text)
+       (numberp (string-match-p "^\\s-*/[a-zA-Z]+" text))))
+
+(defun matisse--parse-slash-command (text)
+  "Parse slash command TEXT into command and arguments.
+Returns a plist with :command, :args, and :raw-args."
+  (let* ((trimmed (string-trim text))
+         (parts (split-string trimmed "\\s-+" t))
+         (command (car parts))
+         (args-text (when (cdr parts)
+                      (string-join (cdr parts) " ")))
+         (parsed-args (when args-text
+                        (matisse--parse-command-arguments args-text))))
+    (list :command command
+          :args parsed-args
+          :raw-args args-text)))
+
+(defun matisse--tokenize-arguments (args-text)
+  "Tokenize ARGS-TEXT, handling quoted strings properly.
+Returns a list of tokens where quoted strings are kept as single tokens."
+  (let ((tokens '())
+        (i 0)
+        (len (length args-text)))
+    (while (< i len)
+      ;; Skip whitespace
+      (while (and (< i len) (= (aref args-text i) ?\s))
+        (setq i (1+ i)))
+
+      (when (< i len)
+        (let ((start i)
+              token)
+          (cond
+           ;; Quoted string
+           ((= (aref args-text i) ?\")
+            (setq i (1+ i)) ; skip opening quote
+            (while (and (< i len) (not (= (aref args-text i) ?\")))
+              (setq i (1+ i)))
+            (setq token (substring args-text (1+ start) i))
+            (when (< i len)
+              (setq i (1+ i)))) ; skip closing quote
+
+           ;; Regular token
+           (t
+            (while (and (< i len)
+                       (not (= (aref args-text i) ?\s)))
+              (setq i (1+ i)))
+            (setq token (substring args-text start i))))
+
+          (when token
+            (push token tokens)))))
+    (nreverse tokens)))
+
+(defun matisse--parse-command-arguments (args-text)
+  "Parse command-line style arguments from ARGS-TEXT.
+Returns an alist of (option . value) pairs.
+Handles quoted strings properly."
+  (let ((args '())
+        (tokens (matisse--tokenize-arguments args-text)))
+    (while tokens
+      (let ((token (car tokens)))
+        (cond
+         ;; Long option with potential value: --option [value]
+         ((string-match "^--\\([a-zA-Z-]+\\)$" token)
+          (let ((option (match-string 1 token))
+                (next-token (cadr tokens)))
+            (if (and next-token (not (string-prefix-p "-" next-token)))
+                (progn
+                  (push (cons option next-token) args)
+                  (setq tokens (cddr tokens)))
+              (push (cons option t) args)
+              (setq tokens (cdr tokens)))))
+
+         ;; Short option with potential value: -i [value]
+         ((string-match "^-\\([a-zA-Z]\\)$" token)
+          (let ((option (match-string 1 token))
+                (next-token (cadr tokens)))
+            (if (and next-token (not (string-prefix-p "-" next-token)))
+                (progn
+                  (push (cons option next-token) args)
+                  (setq tokens (cddr tokens)))
+              (push (cons option t) args)
+              (setq tokens (cdr tokens)))))
+
+         ;; Skip unrecognized tokens
+         (t (setq tokens (cdr tokens))))))
+    (nreverse args)))
+
+(defun matisse--get-temp-file-directory ()
+  "Get or create temp file directory for current session.
+Returns directory path: ~/.claude/projects/<project>/.temp-files/<session-id>/"
+  (let* ((project-dir (matisse--get-project-directory))
+         (session-id (or matisse--conversation-id "pending"))
+         (temp-dir (expand-file-name
+                    (format ".temp-files/%s" session-id)
+                    project-dir)))
+    (unless (file-exists-p temp-dir)
+      (make-directory temp-dir t))
+    temp-dir))
+
+(defun matisse--write-arg-to-temp-file (content)
+  "Write CONTENT to a session-scoped temporary file and return the file path.
+File is stored in ~/.claude/projects/<project>/.temp-files/<session-id>/ so it
+persists for the session lifetime and works with resume.
+The file path is tracked in `matisse--temp-files' for reference."
+  (let* ((temp-dir (matisse--get-temp-file-directory))
+         (temp-file (make-temp-file
+                     (expand-file-name "arg-" temp-dir)
+                     nil ".txt")))
+    (with-temp-file temp-file
+      (insert content))
+    ;; Track for reference (not for immediate cleanup)
+    (push temp-file matisse--temp-files)
+    temp-file))
+
+(defun matisse--maybe-convert-to-file-reference (text &optional prefix)
+  "Convert TEXT to temp file reference if it exceeds threshold.
+If TEXT is longer than `matisse-large-prompt-threshold', writes
+it to a temp file and returns @ reference with optional PREFIX.
+Otherwise returns TEXT unchanged."
+  (if (and (stringp text) (> (length text) matisse-large-prompt-threshold))
+      (let ((temp-file (matisse--write-arg-to-temp-file text)))
+        (matisse--debug-log "Converted large text (%d chars) to temp file: %s" (length text) temp-file)
+        (if prefix
+            (format "%s @%s" prefix temp-file)
+          (format "@%s" temp-file)))
+    text))
+
+(defun matisse--format-slash-command (text)
+  "Format TEXT as a slash command for Claude Code.
+Handles arguments for supported commands. Returns nil for locally
+handled commands. Converts large arguments to temp files with @ references."
+  (let* ((parsed (matisse--parse-slash-command text))
+         (command (plist-get parsed :command))
+         (args (plist-get parsed :args))
+         (raw-args (plist-get parsed :raw-args)))
+
+    (cond
+     ;; Handle /compact with --instructions
+     ((and (equal command "/compact")
+           (assoc "instructions" args))
+      (let ((instructions (cdr (assoc "instructions" args))))
+        (format "Please compact our conversation history using these specific instructions: %s\n\nCompact the conversation while following these guidelines." instructions)))
+
+     ;; Handle /clear command locally (return nil to prevent sending to Claude)
+     ((equal command "/clear")
+      nil)
+
+     ;; Handle help commands locally (return nil to prevent sending to Claude)
+     ((or (equal command "/help")
+          (and args (assoc "help" args)))
+      nil)
+
+     ;; Default: check if raw args are too large
+     (t
+      (if raw-args
+          (matisse--maybe-convert-to-file-reference raw-args command)
+        (string-trim text))))))
+
 (defun matisse--format-user-message (text)
   "Format TEXT as a JSON message for Claude Code.
 If `matisse-send-selection-p' is non-nil and there's a last selection,
 append it as context to the text.
-If there are pending images, include them in the message content."
-  (let* ((selection-context (matisse--format-selection-context))
-         (enhanced-text (if selection-context
-                            (concat text "\n\n" selection-context)
-                          text))
+If there are pending images, include them in the message content.
+If TEXT is a slash command, format it as XML command structure.
+Large non-slash text is converted to temp file references."
+  (let* ((is-slash-command (matisse--is-slash-command-p text))
+         (selection-context (unless is-slash-command
+                              (matisse--format-selection-context)))
+         (initial-text (cond
+                        (is-slash-command
+                         (let ((formatted (matisse--format-slash-command text)))
+                           (if formatted
+                               formatted
+                             ;; Return special marker for locally handled commands
+                             'locally-handled)))
+                        (selection-context (concat text "\n\n" selection-context))
+                        (t text)))
+         ;; Handle large non-slash text by converting to temp file
+         (final-text (if (and (stringp initial-text) (not is-slash-command))
+                         (matisse--maybe-convert-to-file-reference initial-text)
+                       initial-text))
          (content-blocks (list (list (cons 'type "text")
-                                     (cons 'text enhanced-text)))))
+                                     (cons 'text final-text)))))
 
-    ;; Add any pending images to content blocks
-    (when matisse--pending-images
-      (dolist (image (reverse matisse--pending-images))
-        (push (list (cons 'type "image")
-                    (cons 'source (list (cons 'type "base64")
-                                        (cons 'media_type (plist-get image :type))
-                                        (cons 'data (plist-get image :data)))))
-              content-blocks))
-      ;; Clear pending images after adding them
-      (setq matisse--pending-images nil))
+    ;; Handle locally processed commands
+    (if (eq final-text 'locally-handled)
+        (progn
+          ;; Handle the command locally (e.g., show help)
+          (matisse--handle-local-command text)
+          ;; Return nil to prevent sending message to Claude
+          nil)
+      ;; Normal processing for non-local commands
+      (progn
+        ;; Track slash command for completion feedback
+        (when is-slash-command
+          (setq matisse--pending-slash-command (string-trim text)))
 
-    (json-encode
-     `((type . "user")
-       (message . ((role . "user")
-                   (content . ,(vconcat content-blocks))))))))
+        ;; Add any pending images to content blocks
+        (when matisse--pending-images
+          (dolist (image (reverse matisse--pending-images))
+            (push (list (cons 'type "image")
+                        (cons 'source (list (cons 'type "base64")
+                                            (cons 'media_type (plist-get image :type))
+                                            (cons 'data (plist-get image :data)))))
+                  content-blocks))
+          ;; Clear pending images after adding them
+          (setq matisse--pending-images nil))
+
+        (json-encode
+         `((type . "user")
+           (message . ((role . "user")
+                       (content . ,(vconcat content-blocks))))))))))
+
+(defun matisse--handle-local-command (text)
+  "Handle locally processed slash commands like help.
+TEXT is the raw slash command text to process."
+  (let* ((parsed (matisse--parse-slash-command text))
+         (command (plist-get parsed :command))
+         (args (plist-get parsed :args)))
+    (cond
+     ;; Handle /clear command
+     ((equal command "/clear")
+      (matisse-clear))
+
+     ;; Handle /help command
+     ((equal command "/help")
+      (matisse--show-help))
+
+     ;; Handle --help argument for any command
+     ((assoc "help" args)
+      (matisse--show-command-help (substring command 1)))  ; Remove leading /
+
+     ;; Default case
+     (t (message "Unknown local command: %s" command)))))
+
+(defun matisse--show-help ()
+  "Show general help for slash commands."
+  (message "Available commands: /compact [--instructions \"text\"], /cost, /clear, /context. Use --help for specific command help."))
+
+(defun matisse--show-command-help (command)
+  "Show help for a specific COMMAND."
+  (let ((help-text (cond
+                    ((equal command "compact")
+                     "/compact [--instructions \"text\"] - Compact conversation history. Use --instructions to provide specific summarization guidance.")
+                    (t
+                     (format "No specific help available for command: %s" command)))))
+    (message "%s" help-text)))
+
+;;;; Slash Commands
+(defun matisse--get-available-commands ()
+  "Get list of available slash commands.
+Returns dynamically discovered commands merged with local commands."
+  (let ((local-commands '("/clear" "/help"))
+        (discovered (if matisse--available-commands
+                       (append matisse--available-commands nil)
+                     (mapcar #'car matisse--slash-commands))))
+    ;; Merge local commands with discovered commands, removing duplicates
+    (delete-dups (append local-commands discovered))))
+
+(defun matisse--in-input-region-p ()
+  "Return non-nil if point is in the input region."
+  (when-let* ((input-region (matisse--get-input-region)))
+    (and (>= (point) (car input-region))
+         (<= (point) (cdr input-region)))))
+
+(defun matisse--slash-command-completion-at-point ()
+  "Provide completion for slash commands and their arguments."
+  (when (and (matisse--in-input-region-p)
+             (derived-mode-p 'matisse-shell-mode))
+    (let ((input-region (matisse--get-input-region)))
+      (when input-region
+        (let ((input-start (car input-region)))
+          (save-excursion
+            (cond
+             ;; Complete slash commands at beginning of line or after whitespace
+             ((looking-back "/[a-zA-Z-]*" input-start)
+              ;; Find the actual start of the slash command
+              (let ((end (point))
+                    (start (save-excursion
+                             (re-search-backward "/" input-start t)
+                             (point))))
+                (list start end
+                      (matisse--get-available-commands)
+                      :exclusive nil
+                      :annotation-function #'matisse--slash-command-annotation)))
+
+             ;; Complete /compact options
+             ((looking-back "/compact\\s-+--[a-zA-Z-]*" input-start)
+              (let ((start (save-excursion
+                             (re-search-backward "--[a-zA-Z-]*" input-start)
+                             (point)))
+                    (end (point)))
+                (list start end
+                      (mapcar #'car matisse--compact-options)
+                      :exclusive nil
+                      :annotation-function #'matisse--compact-option-annotation))))))))))
+
+(defun matisse--slash-command-annotation (command)
+  "Return annotation for slash COMMAND."
+  (when-let* ((desc (cdr (assoc command matisse--slash-commands))))
+    (concat " — " desc)))
+
+(defun matisse--compact-option-annotation (option)
+  "Return annotation for compact OPTION."
+  (when-let* ((desc (cdr (assoc option matisse--compact-options))))
+    (concat " — " desc)))
 
 (defun matisse--parse-json-line (line)
   "Parse a single LINE of JSON output from Claude Code."
@@ -1271,12 +2542,252 @@ If there are pending images, include them in the message content."
          content
          "")))))
 
+(defun matisse--truncate-text (text max-length)
+  "Truncate TEXT to MAX-LENGTH characters if needed.
+Returns original text if shorter than MAX-LENGTH or if MAX-LENGTH is nil.
+Adds ellipsis and character count indicator for truncated text."
+  (if (and max-length (> (length text) max-length))
+      (let ((num-lines (1+ (cl-count ?\n text))))
+        (format "%s\n... [%d more characters, %d total lines]"
+                (substring text 0 max-length)
+                (- (length text) max-length)
+                num-lines))
+    text))
+
 (defun matisse--debug-log (_format-str &rest args)
   "Log debug message to buffer if debugging is enabled.
 FORMAT-STR is the format string for the message.
-ARGS are the arguments for the format string."
+ARGS are the arguments for the format string.
+Long arguments are truncated to `matisse-debug-log-max-length'."
   (when matisse-debug
-    (message "%S" args)))
+    (let ((truncated-args
+           (mapcar (lambda (arg)
+                     (if (and (stringp arg) (> (length arg) matisse-debug-log-max-length))
+                         (format "%s... [%d more chars]"
+                                 (substring arg 0 matisse-debug-log-max-length)
+                                 (- (length arg) matisse-debug-log-max-length))
+                       arg))
+                   args)))
+      (message "%S" truncated-args))))
+
+(defun matisse--handle-system-message (json-obj)
+  "Handle system messages including compact_boundary and other subtypes.
+JSON-OBJ is the parsed JSON system message object from Claude Code."
+  (let ((subtype (alist-get 'subtype json-obj))
+        (content (alist-get 'content json-obj)))
+    (matisse--debug-log "Handling system message subtype: %s" subtype)
+    (cond
+     ((equal subtype "init")
+      (setq matisse--conversation-id (alist-get 'session_id json-obj))
+      (matisse--debug-log "Set conversation ID: %s" matisse--conversation-id)
+      ;; Extract slash commands from init message
+      ;; slash_commands is a vector of strings without "/" prefix
+      (let ((slash-commands (alist-get 'slash_commands json-obj)))
+        (when slash-commands
+          ;; Add "/" prefix to each command for consistency with completion system
+          (setq matisse--available-commands
+                (mapcar (lambda (cmd) (concat "/" cmd))
+                        (append slash-commands nil))))))
+
+     ((equal subtype "compact_boundary")
+      (let ((compact-metadata (alist-get 'compactMetadata json-obj)))
+        (message "Conversation compacted: %s" content)
+        (when compact-metadata
+          (let ((pre-tokens (alist-get 'preTokens compact-metadata))
+                (trigger (alist-get 'trigger compact-metadata)))
+            (matisse--debug-log "Compact metadata - trigger: %s, preTokens: %s" trigger pre-tokens)
+            (when pre-tokens
+              (message "Tokens before compaction: %d" pre-tokens))))
+        ;; Reset token count after successful compaction
+        (matisse--reset-token-count)))
+
+     (t
+      (matisse--debug-log "Unknown system message subtype: %s, content: %s" subtype content)
+      (when content
+        (message "System: %s" content))))))
+
+(defun matisse--handle-control-request (process request)
+  "Handle control request from Claude Code.
+PROCESS is the Claude Code process.
+REQUEST is the parsed JSON control request."
+  (let* ((request-id (alist-get 'request_id request))
+         (request-data (alist-get 'request request))
+         (subtype (alist-get 'subtype request-data)))
+
+    (matisse--debug-log "Handling control request: %s (%s)" subtype request-id)
+
+    (cond
+     ;; Handle permission requests
+     ((equal subtype "can_use_tool")
+      (matisse--handle-can-use-tool-request process request-id request-data))
+
+     ;; Ignore echoed get_models/get_commands requests
+     ;; These are requests WE sent that Claude is echoing back
+     ((or (equal subtype "get_models")
+          (equal subtype "get_commands"))
+      (matisse--debug-log "Ignoring echoed control request: %s" subtype))
+
+     ;; Unknown request type
+     (t
+      (matisse--debug-log "Unknown control request subtype: %s" subtype)
+      (matisse--send-control-error process request-id
+                                   (format "Unknown control request subtype: %s" subtype))))))
+
+(defun matisse--handle-can-use-tool-request (process request-id request-data)
+  "Handle can_use_tool control request.
+PROCESS is the Claude Code process.
+REQUEST-ID is the request identifier.
+REQUEST-DATA contains tool_name, input, and permission_suggestions."
+  (let* ((tool-name (alist-get 'tool_name request-data))
+         (tool-input (alist-get 'input request-data))
+         (suggestions (alist-get 'permission_suggestions request-data))
+         (buffer-name (buffer-name)))
+
+    (matisse--debug-log "STDIO PERMISSION: Received can_use_tool request for %s (id=%s)"
+                        tool-name request-id)
+
+    ;; First check if tool should be auto-allowed (bypass mode or read-only tools)
+    (if (matisse--should-auto-allow-tool tool-name)
+        ;; Auto-allowed - send response immediately
+        (let ((response `((behavior . "allow")
+                         (updatedInput . ,tool-input))))
+          ;; Include pending permission mode update if user cycled mode
+          (when matisse--pending-permission-update
+            (setq response (append response
+                                  `((updatedPermissions . ((permissionMode . ,matisse--pending-permission-update))))))
+            (setq matisse--pending-permission-update nil))
+          (matisse--send-control-response process request-id response))
+
+      ;; Not auto-allowed - prompt user based on mode
+      (if matisse-in-buffer-permission-prompts
+          ;; In-buffer permission flow
+          (matisse--prompt-permission-in-buffer process request-id tool-name tool-input suggestions)
+
+        ;; Minibuffer flow
+        (let* ((result (matisse--decide-tool-permission-with-suggestions
+                        tool-name tool-input suggestions buffer-name))
+               (decision (car result))
+               (updated-permissions (cdr result)))
+
+          ;; Send response back to Claude Code with proper structure
+          (if (string= decision "allow")
+              ;; Allow: need behavior + updatedInput + optional updatedPermissions
+              (let ((response `((behavior . "allow")
+                               (updatedInput . ,tool-input))))
+                ;; Include updatedPermissions from user's "always" choice
+                (when updated-permissions
+                  (setq response (append response `((updatedPermissions . ,updated-permissions)))))
+                ;; Also include pending permission mode update if user cycled mode
+                (when matisse--pending-permission-update
+                  (setq response (append response
+                                        `((updatedPermissions . ((permissionMode . ,matisse--pending-permission-update))))))
+                  (setq matisse--pending-permission-update nil))
+                (matisse--send-control-response process request-id response))
+            ;; Deny: need behavior + message + interrupt
+            (matisse--send-control-response process request-id
+                                            `((behavior . "deny")
+                                              (message . "User denied permission")
+                                              (interrupt . t)))))))))
+
+(defun matisse--send-control-response (process request-id response-data)
+  "Send control response to Claude Code.
+PROCESS is the Claude Code process.
+REQUEST-ID is the original request identifier.
+RESPONSE-DATA is the response payload."
+  (let ((response-message
+         `((type . "control_response")
+           (response . ((subtype . "success")
+                        (request_id . ,request-id)
+                        (response . ,response-data))))))
+
+    ;; Send JSON response with newline delimiter
+    (let ((json-string (json-encode response-message)))
+      (process-send-string process (concat json-string "\n")))))
+
+(defun matisse--send-control-error (process request-id error-message)
+  "Send control error response to Claude Code.
+PROCESS is the Claude Code process.
+REQUEST-ID is the original request identifier.
+ERROR-MESSAGE describes the error."
+  (let ((error-response
+         `((type . "control_response")
+           (response . ((subtype . "error")
+                        (request_id . ,request-id)
+                        (error . ,error-message))))))
+
+    (process-send-string process
+                         (concat (json-encode error-response) "\n"))))
+
+(defun matisse--handle-control-response (json-obj)
+  "Handle control response from Claude Code.
+JSON-OBJ contains the response data including available commands/models."
+  (let* ((response (alist-get 'response json-obj))
+         (subtype (alist-get 'subtype response)))
+    (matisse--debug-log "Control response subtype: %s" subtype)
+    (cond
+     ((equal subtype "success")
+      ;; Commands and models are nested in response.response
+      (let* ((response-data (alist-get 'response response))
+             (commands (alist-get 'commands response-data))
+             (models (alist-get 'models response-data)))
+        (when commands
+          ;; Extract command names from command objects and add "/" prefix
+          (setq matisse--available-commands
+                (mapcar (lambda (cmd)
+                          (let ((name (alist-get 'name cmd)))
+                            (if (string-prefix-p "/" name)
+                                name
+                              (concat "/" name))))
+                        (append commands nil)))
+          (matisse--debug-log "Discovered %d commands: %s"
+                             (length matisse--available-commands)
+                             matisse--available-commands))
+        (when models
+          (setq matisse--available-models models)
+          (matisse--debug-log "Discovered %d models: %s"
+                             (length models) models))))
+     ((equal subtype "error")
+      (let ((error-msg (alist-get 'error response))
+            (request-id (alist-get 'request_id json-obj)))
+        (message "Matisse: Control response error (request_id: %s): %s" request-id error-msg)
+        (matisse--debug-log "Control response error (request_id: %s): %s" request-id error-msg)
+        (matisse--debug-log "Full error response: %s" json-obj))))))
+
+(defun matisse--handle-jsonrpc-notification (json-obj)
+  "Handle JSON-RPC style notifications from Claude Code.
+JSON-OBJ contains the notification with \\='method and \\='params fields."
+  (let ((method (alist-get 'method json-obj))
+        (params (alist-get 'params json-obj)))
+    (matisse--debug-log "JSON-RPC notification method: %s" method)
+    (cond
+     ((equal method "session/update")
+      (matisse--handle-session-update params))
+     (t
+      (matisse--debug-log "Unhandled JSON-RPC method: %s" method)))))
+
+(defun matisse--handle-session-update (params)
+  "Handle session update notification.
+PARAMS contains sessionId and update fields."
+  (let* ((update (alist-get 'update params))
+         (session-update (alist-get 'sessionUpdate update)))
+    (matisse--debug-log "Session update type: %s" session-update)
+    (cond
+     ((equal session-update "available_commands_update")
+      (let ((commands (alist-get 'availableCommands update)))
+        (when commands
+          ;; Extract command names and add "/" prefix
+          (setq matisse--available-commands
+                (mapcar (lambda (cmd)
+                          (let ((name (alist-get 'name cmd)))
+                            (if (string-prefix-p "/" name)
+                                name
+                              (concat "/" name))))
+                        (append commands nil)))
+          (matisse--debug-log "Discovered %d commands: %s"
+                             (length matisse--available-commands)
+                             matisse--available-commands))))
+     (t
+      (matisse--debug-log "Unhandled session update type: %s" session-update)))))
 
 (defun matisse--process-filter (process output)
   "Process filter for handling OUTPUT from Claude Code PROCESS."
@@ -1303,9 +2814,18 @@ ARGS are the arguments for the format string."
               (when json-obj
                 (matisse--debug-log "Parsed JSON: %s" json-obj)
                 (cond
-                 ((and (equal (alist-get 'type json-obj) "system")
-                       (equal (alist-get 'subtype json-obj) "init"))
-                  (setq matisse--conversation-id (alist-get 'session_id json-obj)))
+                 ;; Handle JSON-RPC style notifications (e.g., session/update)
+                 ((alist-get 'method json-obj)
+                  (matisse--handle-jsonrpc-notification json-obj))
+
+                 ((equal (alist-get 'type json-obj) "control_request")
+                  (matisse--handle-control-request process json-obj))
+
+                 ((equal (alist-get 'type json-obj) "control_response")
+                  (matisse--handle-control-response json-obj))
+
+                 ((equal (alist-get 'type json-obj) "system")
+                  (matisse--handle-system-message json-obj))
 
                  ((equal (alist-get 'type json-obj) "assistant")
                   ;; Clear pending message since we got a response
@@ -1324,9 +2844,8 @@ ARGS are the arguments for the format string."
                           (when (and matisse--shell-context
                                      (plist-get matisse--shell-context :write-output))
                             (condition-case err
-                                (let ((prefix (if (matisse--at-end-of-line-p) "" "\n")))
-                                  (funcall (plist-get matisse--shell-context :write-output)
-                                           (concat prefix progress-msg)))
+                                (funcall (plist-get matisse--shell-context :write-output)
+                                         progress-msg)
                               (error (matisse--debug-log "Error writing progress: %s" (error-message-string err)))))))))
 
                   (let ((text (matisse--extract-assistant-text json-obj)))
@@ -1349,6 +2868,44 @@ ARGS are the arguments for the format string."
                   ;; Clear pending message since we got a response
                   (setq matisse--pending-message nil)
                   (matisse--debug-log "Got result, finishing output")
+
+                  ;; Show completion message for slash commands
+                  (when matisse--pending-slash-command
+                    (matisse--debug-log "Processing slash command completion: %s" matisse--pending-slash-command)
+                    (let ((command matisse--pending-slash-command))
+                      (setq matisse--pending-slash-command nil)
+                      (cond
+                       ((equal command "/clear")
+                        (matisse--debug-log "Handling /clear completion")
+                        (when (and matisse--shell-context
+                                   (plist-get matisse--shell-context :write-output))
+                          (condition-case err
+                              (progn
+                                (matisse--debug-log "Calling write-output for clear completion")
+                                (funcall (plist-get matisse--shell-context :write-output)
+                                         (concat (matisse--get-icon :command) "Conversation cleared")))
+                            (error (matisse--debug-log "Error writing clear completion: %s" (error-message-string err)))))
+                        ;; Reset token count after successful clear
+                        (matisse--debug-log "Resetting token count after clear")
+                        (matisse--reset-token-count))
+
+                       ((equal command "/compact")
+                        ;; Reset token count after successful compact
+                        (matisse--debug-log "Resetting token count after compact")
+                        (matisse--reset-token-count)
+                        ;; Don't show message for compact - it has its own system message handling
+                        nil)
+
+                       ;; For other slash commands, show generic completion
+                       ((string-match-p "^/" command)
+                        (when (and matisse--shell-context
+                                   (plist-get matisse--shell-context :write-output))
+                          (condition-case err
+                              (let ((truncated-command (matisse--truncate-text command matisse-max-progress-message-length)))
+                                (funcall (plist-get matisse--shell-context :write-output)
+                                         (format "%sCommand completed: %s" (matisse--get-icon :command) truncated-command)))
+                            (error (matisse--debug-log "Error writing command completion: %s" (error-message-string err)))))))))
+
                   ;; Track token usage
                   (matisse--track-tokens json-obj)
                   ;; Show performance summary if enabled
@@ -1370,6 +2927,7 @@ ARGS are the arguments for the format string."
                   (when (and matisse--shell-context
                              (plist-get matisse--shell-context :finish-output))
                     (condition-case err
+                        ;; Call the finish function (will be unified version if using new queue)
                         (funcall (plist-get matisse--shell-context :finish-output))
                       (error (matisse--debug-log "Error finishing output: %s" (error-message-string err)))))
                   ;; Signal matisse-shell that response is complete
@@ -1380,54 +2938,130 @@ ARGS are the arguments for the format string."
                   ;; Now finish current message and process next
                   (matisse--finish-current-message)) ;; END COND CLAUSE 3
 
+                 ((equal (alist-get 'type json-obj) "user")
+                  ;; Handle user messages that contain command output
+                  (let* ((message (alist-get 'message json-obj))
+                         (content (and message (alist-get 'content message))))
+                    (when (stringp content)
+                      (cond
+                       ;; Handle local command stdout/stderr
+                       ((string-match-p "<local-command-std\\(out\\|err\\)>" content)
+                        (let ((output (replace-regexp-in-string "<local-command-std\\(out\\|err\\)>\\(.*\\)</local-command-std\\(out\\|err\\)>" "\\2" content)))
+                          (when (and (not (string-empty-p output))
+                                     matisse--shell-context
+                                     (plist-get matisse--shell-context :write-output))
+                            (condition-case err
+                                (let ((formatted-output (format "%s%s" (matisse--get-icon :command) (string-trim output))))
+                                  (funcall (plist-get matisse--shell-context :write-output)
+                                           formatted-output))
+                              (error (matisse--debug-log "Error writing command output: %s" (error-message-string err)))))))
+
+                       ;; Log other user message content for debugging
+                       (t
+                        (matisse--debug-log "User message content: %s" content))))))
+
                  (t
                   (matisse--debug-log "Unhandled message type: %s" (alist-get 'type json-obj))))))))))))
 
-(defun matisse--interrupt ()
-  "Gracefully interrupt the current Claude process while preserving session state."
+(defun matisse--send-control-request (subtype &optional extra-params)
+  "Send a control request to Claude with SUBTYPE and EXTRA-PARAMS.
+EXTRA-PARAMS should be an alist of additional parameters for the request."
+  (when (and matisse--process (process-live-p matisse--process))
+    (let* ((request-id (format "%d" (random 1000000000)))
+           (request-data (append `((subtype . ,subtype)) extra-params))
+           (control-request `((type . "control_request")
+                             (request_id . ,request-id)
+                             (request . ,request-data)))
+           (json-string (json-encode control-request)))
+      (matisse--debug-log "Sending control request: %s" json-string)
+      (process-send-string matisse--process (concat json-string "\n"))
+      t)))
+
+(defun matisse-interrupt ()
+  "Send soft interrupt to Claude without killing the process.
+This tells Claude to stop the current operation but keeps the process alive,
+allowing you to immediately send new messages without restarting.
+
+If a message is currently being processed, marks it as cancelled in the queue.
+Also pauses automatic queue processing until you send a new message."
+  (interactive)
   (if (and matisse--process (process-live-p matisse--process))
       (progn
-        ;; If no session ID yet, that means Claude is still processing the very first message
-        ;; and has not written the session file. Just kill and restart a new session.
-        (unless matisse--conversation-id
-          (when matisse--active-tools
-            (setq matisse--interrupted-tools (copy-sequence matisse--active-tools))))
-
         ;; Stop UI indicators
         (matisse--stop-spinner)
 
-        ;; Store active tools for potential cleanup notification
-        (when matisse--active-tools
-          (setq matisse--interrupted-tools (copy-sequence matisse--active-tools)))
+        ;; Mark current message as cancelled if exists
+        (when (and (boundp 'matisse--current-message-id)
+                   matisse--current-message-id
+                   (boundp 'matisse--message-queue))
+          (when-let* ((msg (cl-find-if (lambda (m)
+                                         (= (plist-get m :id) matisse--current-message-id))
+                                       matisse--message-queue)))
+            (plist-put msg :status 'cancelled)))
 
-        ;; Store session ID for resuming
-        (when matisse--conversation-id
-          (setq matisse--interrupted-session-id matisse--conversation-id))
+        ;; Pause automatic queue processing
+        (setq matisse--queue-paused t)
 
         ;; Reset state variables
         (setq matisse--waiting-for-response nil
-              matisse--active-tools nil)
+              matisse--active-tools nil
+              matisse--current-message-id nil)
 
-        ;; Send SIGINT (Ctrl+C) for graceful interruption that preserves session
-        (interrupt-process matisse--process)
+        ;; Send the interrupt control request
+        (matisse--send-control-request "interrupt")
 
-        ;; Set timer for SIGTERM if process doesn't terminate gracefully
-        (run-at-time 2 nil
-                     (lambda (proc)
-                       (when (and proc (process-live-p proc))
-                         (signal-process proc 'SIGTERM)
-                         ;; And SIGKILL as last resort
-                         (run-at-time 1 nil
-                                      (lambda (p)
-                                        (when (and p (process-live-p p))
-                                          (signal-process p 'SIGKILL)
-                                          (message "Force-killed Claude process")))
-                                      proc)))
-                     matisse--process)
-
-        ;; Clear process reference but keep session ID
-        (setq matisse--process nil))
+        ;; Count pending messages for user feedback
+        (let ((pending-count (length (cl-remove-if-not
+                                      (lambda (msg)
+                                        (eq (plist-get msg :status) 'pending))
+                                      matisse--message-queue))))
+          (if (> pending-count 0)
+              (message "Interrupted Claude (%d message%s paused)"
+                       pending-count
+                       (if (= pending-count 1) "" "s"))
+            (message "Interrupted Claude"))))
     (message "No active Claude process to interrupt")))
+
+(defun matisse--graceful-shutdown ()
+  "Gracefully shut down the Claude process with signal escalation.
+Sends SIGINT, then SIGTERM after 2s, then SIGKILL after 3s total.
+Stores session ID for potential future resume."
+  (when (and matisse--process (process-live-p matisse--process))
+    ;; Store session ID for potential resume
+    (when matisse--conversation-id
+      (setq matisse--interrupted-session-id matisse--conversation-id))
+
+    ;; Store active tools for potential cleanup notification
+    (when matisse--active-tools
+      (setq matisse--interrupted-tools (copy-sequence matisse--active-tools)))
+
+    ;; Stop UI indicators
+    (matisse--stop-spinner)
+
+    ;; Reset state variables
+    (setq matisse--waiting-for-response nil
+          matisse--active-tools nil)
+
+    ;; Close stdin gracefully
+    (ignore-errors
+      (process-send-eof matisse--process))
+
+    ;; Send SIGINT (Ctrl+C) for graceful interruption
+    (interrupt-process matisse--process)
+
+    ;; Set timer for SIGTERM if process doesn't terminate gracefully
+    (run-at-time 2 nil
+                 (lambda (proc)
+                   (when (and proc (process-live-p proc))
+                     (signal-process proc 'SIGTERM)
+                     ;; And SIGKILL as last resort
+                     (run-at-time 1 nil
+                                  (lambda (p)
+                                    (when (and p (process-live-p p))
+                                      (signal-process p 'SIGKILL)
+                                      (message "Force-killed Claude process")))
+                                  proc)))
+                 matisse--process)))
 
 (defun matisse--restore ()
   "Resume the interrupted Claude conversation."
@@ -1450,8 +3084,11 @@ ARGS are the arguments for the format string."
           ;; Clear interrupted state
           (setq matisse--interrupted-session-id nil
                 matisse--interrupted-tools nil))
-      ;; No session to resume - the pending message will be handled by matisse--send-message
-      (message "Ready for new conversation."))))
+      ;; No session to resume - start fresh process
+      (progn
+        (message "Ready for new conversation.")
+        ;; Start a new process without resume flag
+        (matisse--create-process-with-options nil nil)))))
 
 (defun matisse--wait-for-session-file (session-id callback check-count)
   "Wait for session file to exist before resuming.
@@ -1481,106 +3118,26 @@ CHECK-COUNT tracks how many times we've checked."
           (when callback
             (funcall callback)))))))
 
-(defun matisse--wait-and-resume (callback check-count)
-  "Wait for process to terminate, then resume.
-CALLBACK is called after successful resume.
-CHECK-COUNT tracks how many times we've checked."
-  (if (or (not matisse--process) (not (process-live-p matisse--process)))
-      ;; Process is dead, now wait for session file to be written
-      (if matisse--interrupted-session-id
-          (matisse--wait-for-session-file matisse--interrupted-session-id callback 0)
-        ;; No session to resume
-        (progn
-          (matisse--restore)
-          (when callback
-            (funcall callback))))
-    ;; Process still alive, check again
-    (if (< check-count 30) ; Max 3 seconds wait
-        (run-at-time 0.1 nil
-                     (lambda ()
-                       (matisse--wait-and-resume callback (1+ check-count))))
-      ;; Timeout - force kill and resume
-      (progn
-        (message "Process didn't terminate gracefully, forcing...")
-        (when (and matisse--process (process-live-p matisse--process))
-          (delete-process matisse--process)
-          (setq matisse--process nil))
-        (run-at-time 0.2 nil
-                     (lambda ()
-                       (matisse--restore)
-                       (when callback
-                         (funcall callback))))))))
-
-(defun matisse--interrupt-and-resume (&optional callback)
-  "Interrupt current process and resume session after a delay.
-If CALLBACK is provided, it will be called after resumption."
-  (when (and matisse--process (process-live-p matisse--process))
-    ;; Store session for resume if available
-    (when matisse--conversation-id
-      (setq matisse--interrupted-session-id matisse--conversation-id))
-    (matisse--interrupt))
-  ;; Wait for process to fully terminate before resuming
-  (matisse--wait-and-resume callback 0))
-
-(defun matisse-cancel ()
-  "Cancel the currently processing message.
-Interrupts Claude and restarts the process while preserving the session."
-  (interactive)
-  ;; Check if we're in a matisse-shell buffer with active message processing
-  (if (and (boundp 'matisse--current-message-id)
-           matisse--current-message-id)
-      (progn
-        ;; Remove the current message from pending queue if it's there
-        (when (boundp 'matisse--pending-messages)
-          (setq matisse--pending-messages
-                (cl-remove-if (lambda (msg)
-                                (= (car msg) matisse--current-message-id))
-                              matisse--pending-messages)))
-
-        ;; Clear current message state
-        (setq matisse--current-message-id nil)
-
-        ;; Update the response section to show cancellation
-        (when (fboundp 'matisse-shell--write-progress)
-          (matisse-shell--write-progress "[Message cancelled]"))
-        (when (fboundp 'matisse-shell--finish-output)
-          (matisse-shell--finish-output))
-
-        ;; Use the shared interrupt-and-resume function to preserve session
-        (matisse--interrupt-and-resume
-         (lambda ()
-           ;; Process any remaining queued messages after resumption
-           (when (and (boundp 'matisse--pending-messages)
-                      matisse--pending-messages)
-             (run-at-time 0.1 nil
-                          (lambda ()
-                            (when (fboundp 'matisse--process-next-message)
-                              (matisse--process-next-message)))))))
-
-        (message "Matisse message cancelled"))
-    ;; If no active message, just interrupt
-    (when (and matisse--process (process-live-p matisse--process))
-      (matisse--interrupt-and-resume)
-      (message "Matisse process interrupted"))))
-
 (defun matisse--create-process-with-options (&optional resume-session-id continue-flag)
   "Create Claude Code process with optional RESUME-SESSION-ID or CONTINUE-FLAG.
 Returns the created process object."
-  (when (and matisse--process (process-live-p matisse--process))
-    (delete-process matisse--process))
+  ;; Clean up any existing process, whether alive or dead
+  (when matisse--process
+    (when (process-live-p matisse--process)
+      (delete-process matisse--process))
+    ;; Clear the reference even if process is dead
+    (setq matisse--process nil))
 
   (let* ((api-key (matisse--get-api-key))
          (process-environment (cons (format "ANTHROPIC_API_KEY=%s" api-key)
-                                    process-environment))
+                                    (cons (format "MATISSE_BUFFER_NAME=%s" (buffer-name))
+                                          process-environment)))
+         (current-permission-mode (or matisse--current-permission-mode matisse-permission-mode))
          (cmd (list matisse-claude-code-path
-                    "--permission-mode" matisse-permission-mode
+                    "--permission-mode" current-permission-mode
+                    "--permission-prompt-tool" "stdio"
                     "--input-format" "stream-json"
                     "--output-format" "stream-json")))
-
-    ;; Add hooks settings if not in bypassPermissions mode
-    (unless (string= matisse-permission-mode "bypassPermissions")
-      (let ((hook-settings (matisse--generate-hook-settings)))
-        (setq cmd (append cmd (list "--settings" hook-settings)))))
 
     ;; Add continue flag if requested
     (when continue-flag
@@ -1629,17 +3186,37 @@ Returns the created process object."
     (matisse--debug-log "Process started%s: %s"
                         (if resume-session-id " with resume" "")
                         (process-live-p matisse--process))
+
+    ;; Claude Code CLI auto-initializes on startup, no need to send initialize request
+    ;; Request available models and commands after a short delay
+    (let ((process matisse--process)
+          (buffer (current-buffer))
+          (desired-mode current-permission-mode))
+      (run-at-time 0.2 nil
+                   (lambda ()
+                     (when (and process (process-live-p process))
+                       (with-current-buffer buffer
+                         ;; Request models and commands
+                         (matisse--send-control-request "get_models")
+                         (matisse--send-control-request "get_commands")
+                         ;; Set permission mode if needed
+                         (unless (string= desired-mode "default")
+                           (matisse--send-control-request "set_permission_mode"
+                                                         `((mode . ,desired-mode)))
+                           (matisse--debug-log "Set initial permission mode to: %s" desired-mode)))))))
+
     matisse--process))
 
 (defun matisse--start-process-with-resume (session-id)
   "Start the Claude Code process with SESSION-ID for resuming."
   (matisse--create-process-with-options session-id nil))
 
-;;; Process management
+;;;; Process Management
 (defun matisse--enhanced-process-sentinel (process event)
   "Enhanced process sentinel to handle interruptions and abnormal exits.
 PROCESS is the Claude process, EVENT is the process status change."
   (matisse--debug-log "Process event: %s" event)
+
   (let ((buffer (process-get process 'matisse-buffer)))
     (when (and buffer (buffer-live-p buffer))
       (with-current-buffer buffer
@@ -1648,18 +3225,21 @@ PROCESS is the Claude process, EVENT is the process status change."
          ((string-match "finished" event)
           (matisse--stop-spinner)
           (setq matisse--waiting-for-response nil
-                matisse--active-tools nil))
+                matisse--active-tools nil
+                matisse--process nil))
 
          ;; Process was killed/terminated (likely interrupted)
          ((or (string-match "killed" event)
               (string-match "terminated" event))
           (matisse--stop-spinner)
-          (setq matisse--waiting-for-response nil))
+          (setq matisse--waiting-for-response nil
+                matisse--process nil))
 
          ;; Abnormal exit
          ((string-match "exited abnormally" event)
           (matisse--stop-spinner)
-          (setq matisse--waiting-for-response nil)
+          (setq matisse--waiting-for-response nil
+                matisse--process nil)
           ;; Save session for potential resume
           (when matisse--conversation-id
             (setq matisse--interrupted-session-id matisse--conversation-id))
@@ -1680,13 +3260,13 @@ PROCESS is the Claude process, EVENT is the process status change."
                     (matisse--stop-spinner)
                     (message "Claude Code failed to start: %s"
                              (if (> (length error-output) 200)
-                                 (concat (substring error-output 0 197) "…")
+                                 (concat (substring error-output 0 197) "[…]")
                                error-output)))
                   ;; Always log to debug
                   (matisse--debug-log "Claude Code stderr: %s" error-output)
                   ;; TODO add to a matisse stderr buffer because debugging might be turned off
                   )))
-            ;; Notify shell-maker that the command failed if there was a critical error
+            ;; Notify the shell that the command failed if there was a critical error
             (when (and found-critical-error
                        matisse--shell-context
                        (plist-get matisse--shell-context :finish-output))
@@ -1726,6 +3306,24 @@ PROCESS is the Claude process, EVENT is the process status change."
      (message "Matisse error: %s" (error-message-string err))
      (matisse--debug-log "Error in matisse--send-message: %s" (error-message-string err)))))
 
+(defun matisse--send-string-chunked (process string)
+  "Send STRING to PROCESS in chunks to avoid pipe buffer blocking.
+Sends data in chunks of `matisse-chunk-size' bytes, calling
+`accept-process-output' between chunks to allow the subprocess
+to read data and prevent pipe buffer from filling up."
+  (let ((chunk-size matisse-chunk-size)
+        (offset 0)
+        (total-length (length string)))
+    (while (< offset total-length)
+      (let* ((end (min (+ offset chunk-size) total-length))
+             (chunk (substring string offset end)))
+        (matisse--debug-log "Sending chunk %d-%d of %d bytes" offset end total-length)
+        (process-send-string process chunk)
+        (setq offset end)
+        ;; Allow subprocess to read before sending more
+        (when (< offset total-length)
+          (accept-process-output process 0.01))))))
+
 (defun matisse--send-message-async (text)
   "Asynchronously format and send TEXT message to Claude Code process."
   (condition-case err
@@ -1735,10 +3333,19 @@ PROCESS is the Claude process, EVENT is the process status change."
           (matisse--start-process))
 
         (let ((json-msg (matisse--format-user-message text)))
-          (matisse--debug-log "Sending JSON: %s" json-msg)
-          (matisse--debug-log "Process alive before send: %s" (process-live-p matisse--process))
-          (process-send-string matisse--process (concat json-msg "\n"))
-          (matisse--debug-log "Process alive after send: %s" (process-live-p matisse--process))))
+          (if json-msg
+              (progn
+                (matisse--debug-log "Sending JSON: %s" json-msg)
+                (matisse--debug-log "Process alive before send: %s" (process-live-p matisse--process))
+                (let ((full-msg (concat json-msg "\n")))
+                  (if (> (length full-msg) matisse-chunk-threshold)
+                      (progn
+                        (matisse--debug-log "Using chunked sending for large message (%d bytes)" (length full-msg))
+                        (matisse--send-string-chunked matisse--process full-msg))
+                    (process-send-string matisse--process full-msg)))
+                (matisse--debug-log "Process alive after send: %s" (process-live-p matisse--process)))
+            ;; json-msg is nil, meaning command was handled locally
+            (matisse--debug-log "Command handled locally, not sending to Claude"))))
     (error
      ;; Stop the spinner and reset state
      (matisse--stop-spinner)
@@ -1748,8 +3355,7 @@ PROCESS is the Claude process, EVENT is the process status change."
      (message "Matisse error: %s" (error-message-string err))
      (matisse--debug-log "Error in matisse--send-message-async: %s" (error-message-string err)))))
 
-;;; Selection tracking
-
+;;;; Selection Tracking
 (defun matisse--get-selection-info ()
   "Get selection information from the current buffer.
 Returns alist with selection data, nil if no file or matisse buffer."
@@ -1822,7 +3428,7 @@ Returns a string like '@/path/to/file.txt#L5:10-L9:25' or nil if no selection."
 
 (defun matisse--format-selection-status ()
   "Format selection status for mode-line display.
-Returns a string like \\='in matisse.el\\=' or \\='2 lines selected\\='."
+Returns a string like \\='in matisse.el:45\\=' or \\='in matisse.el:45-47\\='."
   (when (and matisse-send-selection-p matisse--last-selection)
     (let* ((file-path (alist-get 'file-path matisse--last-selection))
            (start-line (alist-get 'start-line matisse--last-selection))
@@ -1831,13 +3437,23 @@ Returns a string like \\='in matisse.el\\=' or \\='2 lines selected\\='."
       (when file-path
         (let ((file-name (file-name-nondirectory file-path)))
           (if has-selection
-              (let ((line-count (1+ (- end-line start-line))))
-                (if (= line-count 1)
-                    "1 line selected"
-                  (format "%d lines selected" line-count)))
-            (format "in %s" file-name)))))))
+              (if (= start-line end-line)
+                  (format "in %s:%d" file-name start-line)
+                (format "in %s:%d-%d" file-name start-line end-line))
+            (format "in %s:%d" file-name start-line)))))))
 
-;;; Shell-maker integration
+(defun matisse--format-permission-mode ()
+  "Format permission mode for mode-line display with color."
+  (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
+    (cond
+     ((string= mode "plan")
+      (propertize "[PLAN]" 'face '(:inherit success :weight bold)))
+     ((string= mode "bypassPermissions")
+      (propertize "[ACCEPT]" 'face 'matisse-accept-mode-face))
+     ((string= mode "default")
+      nil)  ; Don't show anything for default mode
+     (t
+      (propertize (format "[%s]" (upcase mode)) 'face '(:weight bold))))))
 
 (defun matisse--execute-command (command shell)
   "Execute COMMAND using Claude Code, writing output to SHELL."
@@ -1874,7 +3490,7 @@ Returns a string like \\='in matisse.el\\=' or \\='2 lines selected\\='."
        ;; Display error message in echo area
        (message "Matisse error: %s" (error-message-string err))
        (matisse--debug-log "Error in matisse--execute-command: %s" (error-message-string err))
-       ;; Notify shell-maker that the command finished with an error
+       ;; Notify the shell that the command finished with an error
        (when (alist-get :finish-output shell)
          (funcall (alist-get :finish-output shell)))))))
 
@@ -1888,31 +3504,44 @@ Returns nil if valid, error message string otherwise."
     "Message is too long.")
    (t nil)))
 
-;;; Configuration
-
 ;; Integration with matisse-shell.el for shell functionality
 
-;;; Public interface
-
+;;;; Public Commands
 ;;;###autoload
-(defun matisse-shell ()
-  "Create a new Matisse Claude Code shell session."
+(defun matisse-start ()
+  "Create a new Matisse Claude Code shell session.
+Starts in the project root if in a project, otherwise in `default-directory'."
   (interactive)
   (matisse--validate-setup)
 
-  ;; Generate buffer name with automatic numbering
-  (let* ((initial-dir default-directory)  ; Store current directory before buffer switching
-         (existing-shells (seq-filter (lambda (buf)
-                                        (with-current-buffer buf
-                                          (derived-mode-p 'matisse-shell-mode)))
-                                      (buffer-list)))
-         (buffer-name (if (zerop (length existing-shells))
-                          "*matisse-shell*"
-                        (format "*matisse-shell<%d>*" (1+ (length existing-shells))))))
-    ;; Create shell context with buffer name and initial directory
-    (let ((shell-context (list :buffer-name buffer-name :initial-directory initial-dir)))
-      ;; Use matisse-shell implementation with buffer name
-      (matisse-shell-start buffer-name shell-context))))
+  ;; Get the working directory (project root or default-directory)
+  (let* ((initial-dir (matisse--get-working-directory))
+         (buffer-name (matisse--generate-buffer-name initial-dir))
+         ;; Create shell context with buffer name and initial directory
+         (shell-context (list :buffer-name buffer-name :initial-directory initial-dir))
+         (buffer (matisse--shell-start buffer-name shell-context)))
+    ;; Set default-directory in the new buffer to ensure process starts there
+    (with-current-buffer buffer
+      (setq default-directory initial-dir))
+    buffer))
+
+;;;###autoload
+(defun matisse-start-in-directory (directory)
+  "Create a new Matisse Claude Code shell session starting in DIRECTORY.
+Prompts for the directory to use, defaulting to `default-directory'."
+  (interactive (list (read-directory-name "Start matisse in directory: " default-directory nil t)))
+  (matisse--validate-setup)
+
+  ;; Use the selected directory
+  (let* ((initial-dir (expand-file-name directory))
+         (buffer-name (matisse--generate-buffer-name initial-dir))
+         ;; Create shell context with buffer name and initial directory
+         (shell-context (list :buffer-name buffer-name :initial-directory initial-dir))
+         (buffer (matisse--shell-start buffer-name shell-context)))
+    ;; Set default-directory in the new buffer to ensure process starts there
+    (with-current-buffer buffer
+      (setq default-directory initial-dir))
+    buffer))
 
 ;;;###autoload
 (defun matisse-shell-switch ()
@@ -1925,7 +3554,7 @@ Returns nil if valid, error message string otherwise."
     (cond
      ((null matisse-buffers)
       (message "No matisse shell buffers found, creating new one...")
-      (matisse-shell))
+      (matisse-start))
      ((= (length matisse-buffers) 1)
       (switch-to-buffer (car matisse-buffers)))
      (t
@@ -1938,27 +3567,24 @@ Returns nil if valid, error message string otherwise."
 ;;;###autoload
 (defun matisse-continue ()
   "Continue the previous Claude conversation in a new shell.
-Uses the --continue flag to maintain context from the last conversation."
+Uses the --continue flag to maintain context from the last conversation.
+Starts in the project root if in a project, otherwise in `default-directory'."
   (interactive)
   (matisse--validate-setup)
 
-  ;; Generate buffer name for continue session
-  (let* ((initial-dir default-directory)
-         (existing-shells (seq-filter (lambda (buf)
-                                        (with-current-buffer buf
-                                          (derived-mode-p 'matisse-shell-mode)))
-                                      (buffer-list)))
-         (buffer-name (if (zerop (length existing-shells))
-                          "*matisse-shell*"
-                        (format "*matisse-shell<%d>*" (1+ (length existing-shells)))))
+  ;; Get the working directory (project root or default-directory)
+  (let* ((initial-dir (matisse--get-working-directory))
+         (buffer-name (matisse--generate-buffer-name initial-dir))
          ;; Create shell context with continue flag
          (shell-context (list :buffer-name buffer-name
                               :initial-directory initial-dir
                               :continue-session t))
          ;; Start the shell
-         (buffer (matisse-shell-start buffer-name shell-context)))
+         (buffer (matisse--shell-start buffer-name shell-context)))
     ;; Create shell context with continue flag
     (with-current-buffer buffer
+      ;; Set default-directory to ensure process starts in the right place
+      (setq default-directory initial-dir)
       ;; Kill any existing process
       (when (and matisse--process (process-live-p matisse--process))
         (delete-process matisse--process))
@@ -1981,7 +3607,7 @@ Uses the --continue flag to maintain context from the last conversation."
           (delete-region (point) (point-max))))
 
       ;; Replay previous conversation and check what type of message was last
-      (let ((last-message-type (matisse-replay-previous-conversation)))
+      (let ((last-message-type (matisse--replay-previous-conversation)))
         ;; Apply syntax highlighting
         (matisse--overlays-put)
 
@@ -2050,23 +3676,74 @@ Uses the --continue flag to maintain context from the last conversation."
 
 ;;;###autoload
 (defun matisse-set-model (model)
-  "Set the Claude MODEL to use for this session only.
-This restarts the Claude process with the new model."
+  "Set the Claude MODEL to use for this session.
+Switches the model without restarting the process if one is running."
   (interactive
-   (list (let* ((choices '(("Sonnet (default)" . "sonnet")
+   (list (let* ((choices '(("Default" . nil)
+                           ("Sonnet" . "sonnet")
                            ("Opus" . "opus")))
                 (selection (completing-read "Model: " choices nil t)))
            (cdr (assoc selection choices)))))
   (let ((old-model (or matisse--current-model matisse-default-model)))
     (setq matisse--current-model model)
-    ;; If we have an active process, gracefully restart it with the new model
+    ;; If we have an active process, send control request to switch model
     (if (and matisse--process (process-live-p matisse--process))
-        (progn
-          (message "Switching model from %s to %s..." old-model model)
-          ;; Use the shared interrupt-and-resume function
-          (matisse--interrupt-and-resume))
+        (if model
+            (progn
+              (matisse--send-control-request "set_model" `((model . ,model)))
+              (message "Switching model from %s to %s" old-model model))
+          (message "Cannot switch to default model while process is running"))
       ;; No active process, just update the setting
-      (matisse--reset))))
+      (message "Model set to %s for next session" (or model "default")))))
+
+;;;###autoload
+(defun matisse-set-permission-mode (mode)
+  "Set the permission MODE for this session.
+Switches the mode without restarting the process if one is running."
+  (interactive
+   (list (let* ((choices '(("Default" . "default")
+                           ("Plan" . "plan")
+                           ("Bypass" . "bypassPermissions")))
+                (selection (completing-read "Permission mode: " choices nil t)))
+           (cdr (assoc selection choices)))))
+  (setq matisse--current-permission-mode mode)
+  ;; Mark that we have a pending permission update to send in next control response
+  (setq matisse--pending-permission-update mode)
+  ;; Update mode-line
+  (matisse--update-mode-line)
+  ;; If we have an active process, send control request to switch mode
+  (if (and matisse--process (process-live-p matisse--process))
+      (progn
+        (matisse--send-control-request "set_permission_mode" `((mode . ,mode)))
+        (matisse--show-permission-mode-message mode))
+    ;; No active process, just update the setting
+    (matisse--show-permission-mode-message mode)))
+
+(defun matisse--show-permission-mode-message (mode)
+  "Display a colored message in the minibuffer showing the current MODE."
+  (let ((message-text
+         (cond
+          ((string= mode "plan")
+           (propertize "■ PLAN MODE" 'face '(:inherit success :weight bold)))
+          ((string= mode "bypassPermissions")
+           (propertize "■ ACCEPT MODE" 'face 'matisse-accept-mode-face))
+          ((string= mode "default")
+           (propertize "■ DEFAULT MODE" 'face 'matisse-default-mode-face))
+          (t
+           (propertize (format "■ %s MODE" (upcase mode)) 'face '(:weight bold))))))
+    (message "%s" message-text)))
+
+;;;###autoload
+(defun matisse-cycle-permission-mode ()
+  "Cycle through permission modes: default -> plan -> bypass -> default."
+  (interactive)
+  (let* ((current (or matisse--current-permission-mode matisse-permission-mode))
+         (next (cond
+                ((string= current "default") "plan")
+                ((string= current "plan") "bypassPermissions")
+                ((string= current "bypassPermissions") "default")
+                (t "default"))))
+    (matisse-set-permission-mode next)))
 
 ;;;###autoload
 (defun matisse-set-temperature (temp)
@@ -2101,22 +3778,6 @@ This restarts the Claude process with the new model."
            (if matisse-show-performance-summary "enabled" "disabled")))
 
 ;;;###autoload
-(defun matisse-cycle-progress-icons ()
-  "Cycle through icon modes: emoji -> nerd-icons -> ascii."
-  (interactive)
-  (setq matisse-progress-icons-mode
-        (pcase matisse-progress-icons-mode
-          ('emoji 'nerd-icons)
-          ('nerd-icons 'ascii)
-          (_ 'emoji)))
-  (matisse--update-shell-prompt)
-  (message "Progress icons mode: %s"
-           (pcase matisse-progress-icons-mode
-             ('emoji "Emoji")
-             ('nerd-icons "Nerd Font icons")
-             ('ascii "ASCII only"))))
-
-;;;###autoload
 (defun matisse-set-progress-icons-mode (mode)
   "Set progress icons display MODE.
 MODE can be \\='emoji, \\='nerd-icons, or \\='ascii."
@@ -2124,10 +3785,10 @@ MODE can be \\='emoji, \\='nerd-icons, or \\='ascii."
    (list (intern (completing-read "Icons mode: "
                                   '("emoji" "nerd-icons" "ascii")
                                   nil t))))
-  (setq matisse-progress-icons-mode mode)
+  (setq matisse-icons-mode mode)
   (matisse--update-shell-prompt)
   (message "Progress icons mode set to: %s"
-           (pcase matisse-progress-icons-mode
+           (pcase matisse-icons-mode
              ('emoji "Emoji")
              ('nerd-icons "Nerd Font icons")
              ('ascii "ASCII only"))))
@@ -2150,7 +3811,7 @@ Uses existing shell if available, otherwise creates a new one."
                            (car shell-buffers))
                           ;; Create new shell if none exist
                           (t
-                           (matisse-shell)
+                           (matisse-start)
                            ;; Find the newly created buffer
                            (car (seq-filter (lambda (buf)
                                              (with-current-buffer buf
@@ -2170,8 +3831,7 @@ Uses existing shell if available, otherwise creates a new one."
   ;; Just kill the buffer - the kill-buffer-hook will handle all the cleanup
   (kill-buffer (current-buffer)))
 
-;;; Token tracking user functions
-
+;;;; Token Tracking Commands
 (defun matisse-show-tokens ()
   "Show current token usage statistics."
   (interactive)
@@ -2185,50 +3845,229 @@ Uses existing shell if available, otherwise creates a new one."
              matisse--tokens-since-compact
              percentage)))
 
+;;;###autoload
+(defun matisse-clear ()
+  "Clear the conversation history by restarting with a fresh session."
+  (interactive)
+  (let ((matisse-buffer (seq-find (lambda (buf)
+                                    (with-current-buffer buf
+                                      (derived-mode-p 'matisse-shell-mode)))
+                                  (buffer-list))))
+    (if matisse-buffer
+        (with-current-buffer matisse-buffer
+          ;; Kill the current process if running
+          (when (and matisse--process (process-live-p matisse--process))
+            (delete-process matisse--process)
+            (setq matisse--process nil))
 
+          ;; Clean up session temp file directory before clearing
+          (when matisse--conversation-id
+            (let ((temp-dir (expand-file-name
+                             (format ".temp-files/%s" matisse--conversation-id)
+                             (matisse--get-project-directory))))
+              (when (file-directory-p temp-dir)
+                (ignore-errors (delete-directory temp-dir t))
+                (matisse--debug-log "Cleaned up temp directory: %s" temp-dir))))
 
-;;; Shell Interface
-;;; Shell implementation integrated from matisse-shell.el
+          ;; Clear all session state
+          (setq matisse--conversation-id nil
+                matisse--interrupted-session-id nil
+                matisse--current-message-id nil
+                matisse--message-queue nil
+                matisse--pending-message nil
+                matisse--pending-slash-command nil
+                matisse--pending-large-paste nil
+                matisse--large-paste-counter 0
+                matisse--temp-files nil
+                matisse--active-tools nil
+                matisse--interrupted-tools nil)
 
-;;; Shell Custom Variables
+          ;; Reset token counter
+          (matisse--reset-token-count)
 
-;; Shell prompt is now dynamic based on matisse-progress-icons-mode
-(defvar matisse-shell-prompt nil
-  "The prompt string to use in matisse shell.")
+          ;; Clear buffer content and reinitialize
+          (let ((inhibit-read-only t))
+            (setq matisse--message-counter 0)
+            (when matisse--message-sections
+              (clrhash matisse--message-sections))
+            (erase-buffer))
 
-(defvar matisse-shell-prompt-regex nil
-  "Regex pattern to match the matisse shell prompt.")
+          ;; Start fresh process (no resume, no continue)
+          (matisse--create-process-with-options nil nil)
+
+          ;; Reinitialize buffer with fresh prompt
+          (matisse--initialize-buffer)
+
+          (message "Conversation cleared - starting fresh session"))
+      (message "No active matisse shell. Use M-x matisse-start to start."))))
+
+;;;###autoload
+(defun matisse-compact (&optional instructions)
+  "Compact the conversation to save context using the /compact slash command.
+With optional INSTRUCTIONS, provide specific guidance for the compaction."
+  (interactive
+   (list (when current-prefix-arg
+           (read-string "Compaction instructions: "))))
+  (let ((matisse-buffer (seq-find (lambda (buf)
+                                    (with-current-buffer buf
+                                      (derived-mode-p 'matisse-shell-mode)))
+                                  (buffer-list))))
+    (if matisse-buffer
+        (with-current-buffer matisse-buffer
+          (let ((command (if instructions
+                            (format "/compact --instructions \"%s\"" instructions)
+                          "/compact")))
+            (matisse--process-user-input-internal command)))
+      (message "No active matisse shell. Use M-x matisse-start to start."))))
+
+;;; Session & Shell Management
+;;;; Message Queue
+(defun matisse--enqueue-message (text &optional type)
+  "Add TEXT to the unified message queue with TYPE.
+TYPE defaults to \\='user but can be \\='slash-command.
+Returns the message plist.
+
+When a new message is enqueued, clears the queue-paused flag to resume
+automatic processing."
+  (let* ((message-id (cl-incf matisse--message-counter))
+         (is-slash (matisse--is-slash-command-p text))
+         (msg-type (or type (if is-slash 'slash-command 'user)))
+         (command (when is-slash (car (split-string (string-trim text) "\\s-+"))))
+         (message (list :id message-id
+                        :type msg-type
+                        :text text
+                        :command command
+                        :status 'pending
+                        :timestamp (current-time-string))))
+    ;; Clear pause flag - user is sending new message
+    (setq matisse--queue-paused nil)
+
+    ;; Add to queue
+    (setq matisse--message-queue
+          (append matisse--message-queue (list message)))
+
+    ;; Create response section
+    (matisse-shell--create-response-section message-id)
+
+    ;; Return the message
+    message))
+
+(defun matisse--dequeue-message ()
+  "Remove and return the first pending message from the queue."
+  (let ((pending (cl-find-if (lambda (msg)
+                                (eq (plist-get msg :status) 'pending))
+                              matisse--message-queue)))
+    (when pending
+      ;; Update status to processing
+      (plist-put pending :status 'processing)
+      pending)))
+
+(defun matisse--get-current-message ()
+  "Get the currently processing message from the queue."
+  (cl-find-if (lambda (msg)
+                (eq (plist-get msg :status) 'processing))
+              matisse--message-queue))
+
+(defun matisse--mark-message-complete (message-id)
+  "Mark MESSAGE-ID as completed in the queue."
+  (when-let* ((msg (cl-find-if (lambda (m)
+                                  (= (plist-get m :id) message-id))
+                                matisse--message-queue)))
+    (plist-put msg :status 'completed)))
+
+(defun matisse--process-queue ()
+  "Process the next pending message in the unified queue.
+Returns early if queue is paused or a message is already processing."
+  (unless (or matisse--queue-paused ; Stop if queue is paused
+              (matisse--get-current-message)) ; Don't start if one is processing
+    (when-let* ((message (matisse--dequeue-message)))
+      (let ((message-id (plist-get message :id))
+            (text (plist-get message :text))
+            (msg-type (plist-get message :type)))
+
+        ;; Set current message ID for compatibility
+        (setq matisse--current-message-id message-id)
+
+        ;; Track slash commands for feedback
+        (when (eq msg-type 'slash-command)
+          (setq matisse--pending-slash-command (string-trim text)))
+
+        ;; Set up shell context
+        (setq matisse--shell-context
+              (list :write-output #'matisse-shell--write-progress
+                    :finish-output #'matisse-shell--finish-output-unified
+                    :buffer-name (buffer-name)
+                    :message-id message-id))
+
+        ;; Send via execute-command
+        (matisse--execute-command text matisse--shell-context)))))
+
+(defun matisse-shell--finish-output-unified ()
+  "Unified version of finish-output that works with the new queue."
+  (matisse--debug-log "finish-output-unified called, mode=%s, msg-id=%s" major-mode matisse--current-message-id)
+  (when (derived-mode-p 'matisse-shell-mode)
+    ;; Mark current message as complete
+    (when matisse--current-message-id
+      (matisse--debug-log "Marking message %s complete" matisse--current-message-id)
+      (matisse--mark-message-complete matisse--current-message-id)
+      (setq matisse--current-message-id nil))
+
+    ;; Note: Temp files are NOT cleaned up here - they persist for the session
+    ;; lifetime to support follow-up questions and resume functionality.
+    ;; Cleanup only happens on explicit /clear command.
+
+    ;; Ensure proper spacing
+    (save-excursion
+      (goto-char (point-max))
+      (let ((at-prompt (matisse--at-prompt-p)))
+        (matisse--debug-log "At prompt: %s, point-max: %d" at-prompt (point-max))
+        (when at-prompt
+          (beginning-of-line)
+          (when (and (> (point) (point-min))
+                     (save-excursion
+                       (backward-char 1)
+                       (not (looking-at "\n"))))
+            (matisse--debug-log "Adding spacing before prompt")
+            (insert "\n")))))
+
+    ;; Ensure there's a prompt at the end
+    (let ((has-prompt (matisse--at-prompt-p)))
+      (matisse--debug-log "Has prompt at end: %s" has-prompt)
+      (unless has-prompt
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (matisse--debug-log "Inserting prompt at end")
+        (matisse--insert-prompt)))
+
+    ;; Refresh overlays
+    (matisse--overlays-put)
+
+    ;; Auto-scroll
+    (matisse--auto-scroll-if-at-end (matisse--user-at-end-p) (current-buffer))
+
+    ;; Process next message after a delay
+    (run-at-time 0.5 nil #'matisse--process-queue)))
+
+;;;; Shell Interface
+;;;; Shell Custom Variables
+;; Shell prompt is now dynamic based on matisse-icons-mode
 
 (defun matisse--update-shell-prompt ()
   "Update shell prompt variables based on current icon mode."
-  (let ((char (matisse--get-shell-prompt-character)))
-    (setq matisse-shell-prompt (concat char " ")
-          matisse-shell-prompt-regex (concat "^" (regexp-quote char) " "))))
+  (let ((char (matisse--get-icon :prompt)))
+    (setq matisse--shell-prompt char
+          matisse--shell-prompt-regex (concat "^" (regexp-quote char)))))
 
-;; Initialize prompt variables
-(matisse--update-shell-prompt)          ; [TODO] this is weird statically updating this!
+;; Initialize prompt variables globally as fallback
+(matisse--update-shell-prompt)
 
-;;; Integration Variables for Shell
-
-(defvar-local matisse--shell-context nil
-  "Context information for integration with main matisse process.")
-
-(defvar-local matisse--current-message-id nil
-  "ID of the currently processing message for response routing.")
-
-(defvar-local matisse--response-sections nil
-  "Hash table mapping message IDs to response section markers.")
-
-(defvar-local matisse--source-buffer nil
-  "Reference to the source shell buffer for history display mode.")
-
+;;;; Integration Variables
 (defun matisse-shell--signal-response-complete ()
   "Signal that the current response is complete and handle spacing."
   (when (eq major-mode 'matisse-shell-mode)
     (matisse-shell--finish-output)))
 
-;;; Shell Customization
-
+;;;; Shell Customization
 (defcustom matisse-history-delete-duplicates t
   "Whether to delete duplicate entries in history.
 When non-nil, adding a message that already exists in history
@@ -2274,33 +4113,8 @@ Common options include \"  - \", \"  • \", \"  ◦ \", \"  ▸ \", \"  → \".
   :type 'string
   :group 'matisse)
 
-;;; Shell Variables
-
-(defvar-local matisse--message-counter 0
-  "Counter for generating unique message IDs.")
-
-(defvar-local matisse--pending-messages nil
-  "Queue of pending messages (id . text) waiting to be sent.")
-
-(defvar-local matisse--history nil
-  "List of previous messages, newest first.")
-
-(defvar-local matisse--history-index nil
-  "Current position in history during navigation.")
-
-(defvar-local matisse--current-input ""
-  "Current input being typed before history navigation.")
-
-(defvar-local matisse--output-start-marker nil
-  "Marker pointing to start of message history region.")
-
-(defvar-local matisse--message-sections nil
-  "Hash table storing message section markers.")
-
-
-;;; Mode Detection and Shell Functions
-
-
+;;;; Shell Variables
+;;;; Mode Detection and Shell Functions
 (defun matisse--normalize-language (language)
   "Normalize common LANGUAGE names to their correct identifiers."
   (when language
@@ -2346,8 +4160,7 @@ Returns the mode symbol if found, nil otherwise."
           (message "DEBUG: Found mode: %s" (or result "none")))
         result))))
 
-;;; Face Definitions
-
+;;;; Face Definitions
 (defface matisse-header-face
   '((t :inherit font-lock-comment-face :weight bold))
   "Face for header text."
@@ -2423,8 +4236,22 @@ Returns the mode symbol if found, nil otherwise."
   "Face for markdown bullet characters."
   :group 'matisse)
 
-;;; Customization Variables
+(defface matisse-accept-mode-face
+  '((t :foreground "medium purple" :weight bold))
+  "Face for accept/bypass permission mode indicator."
+  :group 'matisse)
 
+(defface matisse-default-mode-face
+  '((t :inherit shadow :weight bold))
+  "Face for default permission mode indicator."
+  :group 'matisse)
+
+(defface matisse-permission-prompt-face
+  '((t :inherit warning :weight bold))
+  "Face for in-buffer permission prompts."
+  :group 'matisse)
+
+;;;; Customization Variables
 (defcustom matisse-markdown-hide-emphasis-markers t
   "Whether to hide markdown emphasis markers like ** and *."
   :type 'boolean
@@ -2435,8 +4262,7 @@ Returns the mode symbol if found, nil otherwise."
   :type 'boolean
   :group 'matisse)
 
-;;; Overlay-based Highlighting
-
+;;;; Overlay-based Highlighting
 (defun matisse--position-in-ranges-p (position ranges)
   "Check if POSITION falls within any of the RANGES.
 Each range in RANGES should be a cons cell (start . end)."
@@ -2466,17 +4292,7 @@ Each range in RANGES should be a cons cell (start . end)."
         (push (cons (match-beginning 0) (match-end 0)) matches)))
     (nreverse matches)))
 
-;;; Markdown Support
-
-(defun matisse-toggle-markdown-emphasis-markers ()
-  "Toggle visibility of markdown emphasis markers."
-  (interactive)
-  (setq matisse-markdown-hide-emphasis-markers
-        (not matisse-markdown-hide-emphasis-markers))
-  (matisse--overlays-put)
-  (message "Markdown emphasis markers %s"
-           (if matisse-markdown-hide-emphasis-markers "hidden" "visible")))
-
+;;;; Markdown Support
 (defun matisse--find-markdown-code-blocks ()
   "Find all markdown code blocks in buffer.
 Returns list of alists with keys: start, end, language, body."
@@ -2502,7 +4318,7 @@ Returns list of alists with keys: start, end, language, body."
             (let ((body-end (line-beginning-position))
                   (end-start (match-beginning 0)))
               (push (list 'start (cons start-marker (+ start-marker 3))  ; Just the ```
-                          'end (cons end-start (+ end-start 3))  ; Just the ```
+                          'end (cons end-start (match-end 0))  ; The entire closing marker match
                           'language (when (and lang-start lang-end
                                                (> lang-end lang-start))
                                       (cons lang-start lang-end))
@@ -2839,12 +4655,6 @@ TEXT-START to TEXT-END marks the actual text."
      'evaporate t
      'invisible t)))
 
-(defun matisse-refresh-overlays ()
-  "Manually refresh all overlays in the buffer."
-  (interactive)
-  (matisse--overlays-put)
-  (message "Overlays refreshed"))
-
 (defun matisse-debug-code-blocks ()
   "Debug function to show found code blocks."
   (interactive)
@@ -3152,14 +4962,15 @@ FULL-START to FULL-END is the entire [text](url) pattern."
             (browse-url url)))
         (overlay-put text-overlay 'keymap map)))))
 
-
-;;; Buffer Initialization
-
+;;;; Buffer Initialization
 (defun matisse--initialize-buffer ()
   "Set up initial buffer content and markers."
   ;; Ensure marker exists
   (unless matisse--output-start-marker
     (setq matisse--output-start-marker (make-marker)))
+
+  ;; Initialize shell prompt variables for this buffer
+  (matisse--update-shell-prompt)
 
   ;; Clear buffer with read-only inhibited
   (let ((inhibit-read-only t))
@@ -3181,8 +4992,59 @@ FULL-START to FULL-END is the entire [text](url) pattern."
   ;; Insert initial prompt
   (matisse--insert-prompt))
 
-;;; Region Management
+;;;; Buffer State Management
+(defun matisse-clear-buffer ()
+  "Clear all messages and reset buffer."
+  (interactive)
+  (let ((inhibit-read-only t))
+    ;; Clean up animation state
+    (setq matisse--waiting-for-response nil
+          matisse--pending-permission-request nil)
+    (matisse--stop-spinner)
 
+    ;; Reset state
+    (setq matisse--message-counter 0
+          matisse--message-queue nil  ; Clear unified queue
+          matisse--current-message-id nil)
+    (clrhash matisse--message-sections)
+
+    ;; Reinitialize buffer
+    (matisse--initialize-buffer)))
+
+(defun matisse--kill-buffer-hook ()
+  "Cleanup when buffer is killed."
+  ;; Clear markers
+  (when matisse--output-start-marker
+    (set-marker matisse--output-start-marker nil))
+
+  ;; Clear message section markers
+  (when matisse--message-sections
+    (maphash (lambda (_id section)
+               (when-let* ((end-marker (plist-get section :response-end)))
+                 (set-marker end-marker nil)))
+             matisse--message-sections)))
+
+(defun matisse--shell-start (buffer-name &optional shell-context)
+  "Start Matisse shell with integration to main matisse process.
+BUFFER-NAME is the name of the buffer to create.
+SHELL-CONTEXT contains integration information from main matisse system."
+  ;; Always generate a new unique buffer, even if buffer-name already exists
+  ;; This ensures each matisse-shell invocation creates a fresh session
+  (let ((buffer (generate-new-buffer buffer-name)))
+    (with-current-buffer buffer
+      ;; Store context for integration
+      (setq matisse--shell-context shell-context)
+
+      ;; Initialize shell mode
+      (matisse-shell-mode)
+
+      ;; Switch to the buffer
+      (switch-to-buffer buffer)
+
+      ;; Return the buffer for caller
+      buffer)))
+
+;;;; Region Management
 (defun matisse--get-input-region ()
   "Return (start . end) of current input region.
 Works with multiline input - finds the last prompt in buffer and goes to
@@ -3190,30 +5052,34 @@ end of buffer."
   (save-excursion
     (goto-char (point-max))
     ;; Search backward for the most recent prompt
-    (when (re-search-backward matisse-shell-prompt-regex nil t)
-      (let ((start (+ (point) (length matisse-shell-prompt)))  ; After prompt
+    (when (re-search-backward matisse--shell-prompt-regex nil t)
+      (let ((start (+ (point) (length matisse--shell-prompt))) ; After prompt
             (end (point-max)))
         (when (>= end start)
           (cons start end))))))
 
-;;; Input Handling & Prompt Management
-
+;;;; Input Handling & Prompt Management
 (defun matisse--insert-prompt ()
   "Insert prompt at end of buffer and set up input region."
+  (matisse--debug-log "Inserting prompt at point %d (bolp=%s)" (point) (bolp))
   (condition-case err
       (let ((inhibit-read-only t))
         (goto-char (point-max))
-        (unless (bolp) (insert "\n"))
+        (unless (bolp)
+          (matisse--debug-log "Not at BOL, inserting newline")
+          (insert "\n"))
 
         ;; Insert prompt with properties - character gets special face, space doesn't
         (let ((prompt-start (point)))
-          (insert matisse-shell-prompt)
+          (matisse--debug-log "Inserting prompt text at %d" prompt-start)
+          (insert matisse--shell-prompt)
           ;; Apply face only to prompt character
           (when (and prompt-start (> (point) prompt-start))
-            (put-text-property prompt-start (+ prompt-start (length (matisse--get-shell-prompt-character))) 'face 'matisse-prompt-character-face)
+            (put-text-property prompt-start (+ prompt-start (length (matisse--get-icon :prompt))) 'face 'matisse-prompt-character-face)
             ;; Make entire prompt read-only
             (put-text-property prompt-start (point) 'read-only t)
-            (put-text-property prompt-start (point) 'rear-nonsticky '(read-only))))
+            (put-text-property prompt-start (point) 'rear-nonsticky '(read-only)))
+          (matisse--debug-log "Prompt inserted, now at point %d" (point)))
 
         ;; Position cursor for input
         (goto-char (point-max))
@@ -3232,7 +5098,7 @@ end of buffer."
   (interactive)
   (beginning-of-line)
   ;; Check if current line starts with the prompt
-  (if (looking-at matisse-shell-prompt-regex)
+  (if (looking-at matisse--shell-prompt-regex)
       ;; Skip past the prompt and space
       (goto-char (+ (point) 2))
     ;; Already at beginning of line (no prompt on this line)
@@ -3262,21 +5128,47 @@ end of buffer."
   (interactive)
   ;; Always go to end of buffer to ensure we capture all input
   (goto-char (point-max))
-  (let ((input (string-trim (matisse--get-current-input-text)))
-        ;; Capture exact boundaries - now (point) is guaranteed to be at point-max
-        (prompt-start (save-excursion
-                        (goto-char (point-max))
-                        (when (re-search-backward matisse-shell-prompt-regex nil t)
-                          (line-beginning-position))))
-        (input-end (point-max)))
+  (let* ((raw-input (string-trim (matisse--get-current-input-text)))
+         (input-length (length raw-input))
+         ;; Check if this is a large paste
+         (is-large-paste (> input-length matisse-large-paste-threshold))
+         ;; Capture exact boundaries - now (point) is guaranteed to be at point-max
+         (prompt-start (save-excursion
+                         (goto-char (point-max))
+                         (when (re-search-backward matisse--shell-prompt-regex nil t)
+                           (line-beginning-position))))
+         (input-end (point-max))
+         (actual-input raw-input))
+
+    ;; Handle large pastes by creating placeholder
+    (when is-large-paste
+      (let* ((paste-num (cl-incf matisse--large-paste-counter))
+             (input-region (matisse--get-input-region))
+             ;; Count lines in raw-input (already have it)
+             (num-lines (1+ (cl-count ?\n raw-input)))
+             (placeholder (format "[Pasted text #%d +%d lines]" paste-num num-lines)))
+        (setq matisse--pending-large-paste (list :text actual-input
+                                                 :placeholder placeholder))
+        ;; Replace visible text with placeholder
+        (when (and prompt-start input-region)
+          (let ((inhibit-read-only t))
+            (delete-region (car input-region) (cdr input-region))
+            (goto-char (car input-region))
+            (insert placeholder)
+            (setq input-end (point))))))
 
     ;; Now move to end and add newline
-    (goto-char input-end)
+    (goto-char (point-max))
     (insert "\n")
 
     (cond
+     ;; Check if responding to permission prompt
+     ((and matisse--pending-permission-request
+           (not (string-empty-p actual-input)))
+      (matisse--handle-permission-response actual-input))
+
      ;; Empty input - just add new prompt
-     ((string-empty-p input)
+     ((string-empty-p actual-input)
       ;; Apply inactive face to empty prompt line (only if we found the prompt)
       (when prompt-start
         (let ((inhibit-read-only t))
@@ -3296,8 +5188,8 @@ end of buffer."
           ;; Apply inactive face to entire line (this will override the prompt character face)
           (put-text-property prompt-start input-end 'face 'matisse-prompt-inactive-face)))
 
-      ;; Continue with normal processing
-      (matisse--process-user-input-internal input)))))
+      ;; Continue with normal processing using actual input (not display placeholder)
+      (matisse--process-user-input-internal actual-input)))))
 
 (defun matisse--process-user-input-internal (input)
   "Process user INPUT and queue for sending - internal implementation."
@@ -3312,7 +5204,7 @@ end of buffer."
         ;; Check for special commands
         (cond
          ;; Handle exit/quit commands
-         ((member (string-trim (downcase input)) '("exit" "quit" "bye"))
+         ((member (string-trim (downcase input)) matisse-exit-commands)
           (when (fboundp 'matisse-quit)
             (matisse-quit)))
 
@@ -3325,7 +5217,10 @@ end of buffer."
           (matisse--auto-scroll-if-at-end (matisse--user-at-end-p) (current-buffer))
 
           ;; Process message asynchronously
-          (matisse--send-user-message input))))
+          (matisse--send-user-message input)
+
+          ;; Clear large paste state after queuing message
+          (setq matisse--pending-large-paste nil))))
     (error
      (message "Error in matisse--process-user-input-internal: %s" (error-message-string err))
      ;; Ensure we always have a prompt
@@ -3340,7 +5235,7 @@ end of buffer."
   (save-excursion
     (goto-char (point-max))
     (beginning-of-line)
-    (looking-at-p matisse-shell-prompt)))
+    (looking-at-p matisse--shell-prompt)))
 
 (defun matisse--newline ()
   "Insert a newline in the current input."
@@ -3358,8 +5253,7 @@ end of buffer."
           (matisse--auto-scroll-if-at-end (matisse--user-at-end-p) (current-buffer)))
       (message "Not in input area"))))
 
-;;; History Management
-
+;;;; History Management
 (defun matisse--add-to-history (text)
   "Add TEXT to history list (newest first)."
   ;; Don't add empty messages
@@ -3431,8 +5325,7 @@ end of buffer."
      (t
       (message "End of history; no default available")))))
 
-;;; History Search
-
+;;;; History Search
 (defun matisse-history-search-backward (regexp)
   "Search backward through history for entries matching REGEXP."
   (interactive "sSearch history backward (regexp): ")
@@ -3499,8 +5392,7 @@ end of buffer."
         (message "No %s match for: %s"
                  (if (< direction 0) "previous" "next") (or regexp "[nil]"))))))
 
-;;; History Completing Read
-
+;;;; History Completing Read
 (defun matisse-history-complete ()
   "Select from history using `completing-read' with fuzzy matching."
   (interactive)
@@ -3524,8 +5416,7 @@ end of buffer."
         (matisse--replace-current-input selected)
         (message "Selected: %s" (or selected "[nil]"))))))
 
-;;; History Display
-
+;;;; History Display
 (defun matisse-history-show ()
   "Display complete history in a separate buffer for selection."
   (interactive)
@@ -3589,47 +5480,55 @@ end of buffer."
           (when (derived-mode-p 'matisse-shell-mode)
             (matisse--replace-current-input selected-text)))))))
 
-;;; Auto-scroll Utility
-
+;;;; Auto-scroll Utility
 (defun matisse--user-at-end-p ()
   "Check if user is at or near the end of the buffer for scrolling purposes."
   (>= (point) (- (point-max) 1)))
 
-(defun matisse--auto-scroll-if-at-end (at-end-condition buffer)
+(defun matisse--auto-scroll-if-at-end (at-end-condition buffer &optional force)
   "Auto-scroll to keep all typed input visible when AT-END-CONDITION is true.
 BUFFER specifies which buffer to scroll.
-Intelligently handles multi-line input at the prompt."
+If FORCE is non-nil, scroll immediately bypassing throttle.
+Throttles scroll requests to prevent jumpy repositioning during streaming
+output while ensuring prompt stays visible."
   (when at-end-condition
     (let ((shell-window (get-buffer-window buffer)))
       (when shell-window
-        (with-selected-window shell-window
-          (with-current-buffer buffer
-            ;; Save cursor position to avoid interfering with movement commands
-            (let ((original-point (point)))
-              (save-excursion
-                (goto-char (point-max))
-                ;; Find the prompt start to calculate input height
-                (let* ((prompt-line (save-excursion
-                                      (goto-char (point-max))
-                                      (if (re-search-backward matisse-shell-prompt-regex nil t)
-                                          (line-number-at-pos)
-                                        nil)))
-                       (current-line (line-number-at-pos (point-max)))
-                       (input-lines (if prompt-line
-                                        (1+ (- current-line prompt-line))
-                                      1))
-                       ;; Calculate window height
-                       (window-height (window-height))
-                       ;; Keep at least 2 lines margin at bottom, but adjust for multi-line input
-                       (desired-margin (min 2 (max 1 (- window-height input-lines 3)))))
-                  ;; Use recenter with dynamic margin based on input size
-                  ;; Negative value means lines from bottom
-                  (recenter (- desired-margin))))
-              ;; Restore original cursor position
-              (goto-char original-point))))))))
+        (with-current-buffer buffer
+          ;; Check if enough time has passed since last scroll (or forced)
+          (let* ((now (float-time))
+                 (last-scroll (or matisse--last-scroll-time 0))
+                 (elapsed-ms (* 1000 (- now last-scroll))))
+            (when (or force (>= elapsed-ms matisse--scroll-throttle-ms))
+              ;; Update last scroll time
+              (setq matisse--last-scroll-time now)
+              ;; Perform scroll
+              (with-selected-window shell-window
+                ;; Save cursor position to avoid interfering with movement commands
+                (let ((original-point (point)))
+                  (save-excursion
+                    (goto-char (point-max))
+                    ;; Find the prompt start to calculate input height
+                    (let* ((prompt-line (save-excursion
+                                          (goto-char (point-max))
+                                          (if (re-search-backward matisse--shell-prompt-regex nil t)
+                                              (line-number-at-pos)
+                                            nil)))
+                           (current-line (line-number-at-pos (point-max)))
+                           (input-lines (if prompt-line
+                                            (1+ (- current-line prompt-line))
+                                          1))
+                           ;; Calculate window height
+                           (window-height (window-height))
+                           ;; Keep at least 2 lines margin at bottom, but adjust for multi-line input
+                           (desired-margin (min 2 (max 1 (- window-height input-lines 3)))))
+                      ;; Use recenter with dynamic margin based on input size
+                      ;; Negative value means lines from bottom
+                      (recenter (- desired-margin))))
+                  ;; Restore original cursor position
+                  (goto-char original-point))))))))))
 
-;;; Visual Design & Message Section Creation
-
+;;;; Visual Design & Message Section Creation
 (defun matisse--display-user-message (text)
   "Display user's message with proper formatting.
 TEXT is the message content to display."
@@ -3706,44 +5605,15 @@ CONTENT is the new content to set."
       ;; (matisse--overlays-put)  ; Commented out to prevent incorrect face application
       )))
 
-;;; Simplified Message Sending
-
+;;;; Simplified Message Sending
 (defun matisse--send-user-message (input)
   "Send user INPUT message directly to Claude."
+  ;; Use unified queue
+  (matisse--enqueue-message input)
 
-  (let ((message-id (cl-incf matisse--message-counter)))
-    ;; Create response section for this message
-    (matisse-shell--create-response-section message-id)
-
-    ;; Add to pending messages queue with the input text
-    (setq matisse--pending-messages
-          (append matisse--pending-messages (list (cons message-id input))))
-
-
-    ;; If no message is currently being processed, send this one
-    (unless matisse--current-message-id
-      (matisse--process-next-message))))
-
-(defun matisse--process-next-message ()
-  "Process the next message in the queue."
-  (when matisse--pending-messages
-    (let* ((msg-pair (car matisse--pending-messages))
-           (message-id (car msg-pair))
-           (input (cdr msg-pair)))
-
-
-      ;; Set this as the current message - should already be in shell buffer context
-      (setq matisse--current-message-id message-id)
-
-      ;; Set up shell context for this message
-      (setq matisse--shell-context
-            (list :write-output #'matisse-shell--write-progress
-                  :finish-output #'matisse-shell--finish-output
-                  :buffer-name (buffer-name)
-                  :message-id message-id))
-
-      ;; Send via execute-command to get proper mode-line updates
-      (matisse--execute-command input matisse--shell-context))))
+  ;; Process queue if nothing is currently processing
+  (unless (matisse--get-current-message)
+    (matisse--process-queue)))
 
 (defun matisse-shell--create-response-section (message-id)
   "Create a response section for MESSAGE-ID in the current shell buffer."
@@ -3764,6 +5634,7 @@ CONTENT is the new content to set."
       (setq section-start (point-max))
       (goto-char section-start))
 
+    ;; Ensure we're at the beginning of a line
     (unless (bolp) (insert "\n"))
 
     ;; Insert response marker (visible during development, can be hidden later)
@@ -3800,10 +5671,12 @@ CONTENT is the new content to set."
       (save-excursion
         (goto-char response-end)
         (let ((content-start (point))
-              (inhibit-read-only t))  ; Allow inserting in read-only regions
-          (insert content)
+              (inhibit-read-only t)  ; Allow inserting in read-only regions
+              ;; Trim leading newlines to avoid blank lines after progress indicators
+              (trimmed-content (string-trim-left content "[\n]+")))
+          (insert trimmed-content)
           ;; Ensure content ends with newline for prompt separation
-          (unless (or (string-suffix-p "\n" content)
+          (unless (or (string-suffix-p "\n" trimmed-content)
                       (eobp))
             (insert "\n"))
           ;; Explicitly remove any inactive face that might have been inherited
@@ -3827,11 +5700,33 @@ CONTENT is the new content to set."
                                            (goto-char current-pos)
                                            (matisse--user-at-end-p))) (current-buffer)))))
 
+(defun matisse--get-current-response-position ()
+  "Get the insertion position for the current message's response.
+Returns the response-end marker position if available, or point-max as fallback."
+  (if (and (boundp 'matisse--current-message-id)
+           matisse--current-message-id
+           (boundp 'matisse--response-sections)
+           matisse--response-sections)
+      (let ((section (gethash matisse--current-message-id matisse--response-sections)))
+        (if section
+            (let ((response-end (plist-get section :response-end)))
+              (if (markerp response-end)
+                  (marker-position response-end)
+                (point-max)))
+          (point-max)))
+    (point-max)))
+
 (defun matisse-shell--write-progress (text)
   "Write progress TEXT to the shell buffer."
   ;; This function should be called from within the target shell buffer context
-  (when (derived-mode-p 'matisse-shell-mode)
-    (let ((at-end (matisse--user-at-end-p)))
+  (when (and (derived-mode-p 'matisse-shell-mode)
+             ;; Skip if text is only whitespace
+             (not (string-blank-p text)))
+    (let* ((at-end (matisse--user-at-end-p))
+           ;; Trim leading newlines from text to avoid double spacing
+           (trimmed-text (string-trim-left text "[\n]+"))
+           ;; Truncate if too long, even in verbose mode
+           (display-text (matisse--truncate-text trimmed-text matisse-max-progress-message-length)))
       (save-excursion
         ;; Find the current response end marker
         (when (and matisse--current-message-id
@@ -3845,8 +5740,9 @@ CONTENT is the new content to set."
                 ;; Add newline before progress if needed
                 (unless (bolp) (insert "\n"))
                 (setq start-pos (point))
-                (insert text)
-                (unless (string-suffix-p "\n" text) (insert "\n"))
+                (insert display-text)
+                (unless (string-suffix-p "\n" trimmed-text)
+                  (insert "\n"))
 
                 ;; Explicitly remove any inactive face that might have been inherited
                 (let ((pos start-pos))
@@ -3871,10 +5767,6 @@ CONTENT is the new content to set."
   (when (derived-mode-p 'matisse-shell-mode)
     ;; Only process if we have a current message (avoid duplicate calls)
     (when matisse--current-message-id
-      ;; Remove completed message from pending queue
-      (when (and matisse--pending-messages
-                 (= (caar matisse--pending-messages) matisse--current-message-id))
-        (setq matisse--pending-messages (cdr matisse--pending-messages)))
       ;; Clear current message
       (setq matisse--current-message-id nil))
 
@@ -3890,95 +5782,22 @@ CONTENT is the new content to set."
                      (not (looking-at "\n"))))
           (insert "\n"))))
 
+    ;; Ensure there's a prompt at the end
+    (unless (matisse--at-prompt-p)
+      (goto-char (point-max))
+      (unless (bolp) (insert "\n"))
+      (matisse--insert-prompt))
+
     ;; Refresh overlays one final time when response is complete
     (matisse--overlays-put)
 
     ;; Auto-scroll when output is finished to show completion
     (matisse--auto-scroll-if-at-end (matisse--user-at-end-p) (current-buffer))
 
-    ;; Process next message if any are queued
-    (when matisse--pending-messages
-      ;; Small delay to ensure Claude is ready for next message
-      (run-at-time 0.5 nil
-                   (lambda (&rest _)
-                     ;; Should already be in shell buffer context
-                     (matisse--process-next-message))))))
+    ;; Process next message from unified queue if any are queued
+    (run-at-time 0.1 nil #'matisse--process-queue)))
 
-(defun matisse--cancel-current-message ()
-  "Cancel the currently processing message."
-  (interactive)
-  (when matisse--current-message-id
-    ;; Remove the current message from pending queue if it's there
-    (setq matisse--pending-messages
-          (cl-remove-if (lambda (msg)
-                          (= (car msg) matisse--current-message-id))
-                        matisse--pending-messages))
-
-    ;; Clear current message state
-    (setq matisse--current-message-id nil)
-
-    ;; Update the response section to show cancellation
-    (matisse-shell--write-progress "[Message cancelled]")
-    (matisse-shell--finish-output)
-
-    ;; Use the shared interrupt-and-resume function to preserve session
-    (matisse--interrupt-and-resume
-     (lambda ()
-       ;; Process any remaining queued messages after resumption
-       (when matisse--pending-messages
-         (run-at-time 0.1 nil (lambda (&rest _) (matisse--process-next-message))))))
-
-    (message "Matisee message cancelled")))
-
-;;; Buffer State Management
-
-(defun matisse--clear-buffer ()
-  "Clear all messages and reset buffer."
-  (interactive)
-  (let ((inhibit-read-only t))
-    ;; Reset state
-    (setq matisse--message-counter 0
-          matisse--pending-messages nil
-          matisse--current-message-id nil)
-    (clrhash matisse--message-sections)
-
-    ;; Reinitialize buffer
-    (matisse--initialize-buffer)))
-
-(defun matisse--kill-buffer-hook ()
-  "Cleanup when buffer is killed."
-  ;; Clear markers
-  (when matisse--output-start-marker
-    (set-marker matisse--output-start-marker nil))
-
-  ;; Clear message section markers
-  (when matisse--message-sections
-    (maphash (lambda (_id section)
-               (when-let* ((end-marker (plist-get section :response-end)))
-                 (set-marker end-marker nil)))
-             matisse--message-sections)))
-
-;;; Public Interface
-(defun matisse-shell-start (buffer-name &optional shell-context)
-  "Start Matisse shell with integration to main matisse process.
-BUFFER-NAME is the name of the buffer to create.
-SHELL-CONTEXT contains integration information from main matisse system."
-  (let ((buffer (get-buffer-create buffer-name)))
-    (with-current-buffer buffer
-      ;; Store context for integration
-      (setq matisse--shell-context shell-context)
-
-      ;; Initialize shell mode
-      (matisse-shell-mode)
-
-      ;; Switch to the buffer
-      (switch-to-buffer buffer)
-
-      ;; Return the buffer for caller
-      buffer)))
-
-;;; Post-command hook for smart scrolling
-
+;;;; Post-command hook for smart scrolling
 (defun matisse--post-command-scroll ()
   "Ensure typed text remains visible after each command.
 Only scrolls when user is typing at the prompt."
@@ -3988,9 +5807,7 @@ Only scrolls when user is typing at the prompt."
              ;; And cursor is near the end
              (matisse--user-at-end-p))
     (matisse--auto-scroll-if-at-end (matisse--user-at-end-p) (current-buffer))))
-
-;;; Image Support Functions
-
+;;;; Image Support Functions
 (defun matisse--image-yank-media-handler (mimetype data)
   "Handle pasted images in matisse-shell buffers.
 MIMETYPE is the MIME type of the image data (can be string or symbol).
@@ -4009,9 +5826,202 @@ DATA is the raw image data."
       ;; Insert a visual indicator in the buffer
       (insert (format "[Image pasted: %s]" filename))
       t))) ; Return t to indicate we handled the media
+;;; Mode Definitions, Interactive Commands & Keymaps
+;;;; Keymaps
+(defvar matisse-command-map
+  (let ((map (make-sparse-keymap)))
+    ;; Session Management
+    (define-key map "q" #'matisse-quit)
+    (define-key map "C" #'matisse-clear)   ; uppercase to avoid accidental clear
+    (define-key map "k" #'matisse-compact) ; kompact
+    (define-key map "i" #'matisse-interrupt)
 
-;;; Major Mode Definition
+    ;; History
+    (define-key map "h" #'matisse-history-show)
+    (define-key map "H" #'matisse-history-complete)
 
+    ;; Configuration
+    (define-key map "m" #'matisse-set-model)
+    (define-key map "M" #'matisse-cycle-permission-mode)
+    (define-key map "t" #'matisse-set-temperature)
+
+    ;; Display Toggles
+    (define-key map "p" #'matisse-toggle-progress-indicators)
+    (define-key map "f" #'matisse-toggle-file-changes)
+    (define-key map "P" #'matisse-toggle-performance-summary)
+    (define-key map "y" #'matisse-set-progress-icons-mode)
+
+    ;; Utility
+    (define-key map "d" #'matisse-show-stderr) ; debug
+    (define-key map "T" #'matisse-show-tokens)
+
+    ;; Media
+    (define-key map "i" #'yank-media)
+
+    ;; Menu
+    (define-key map "?" #'matisse-menu) ; show transient menu
+
+    map)
+  "Keymap for Matisse commands.
+All commands are prefixed with `matisse-prefix-key' (default \\[matisse-prefix-key]).
+Use \\[describe-keymap] to see all available commands.")
+
+;;;; Transient Menus
+(when (featurep 'transient)
+  (transient-define-prefix matisse-transient-menu ()
+    "Matisse Commands Menu"
+    [["Session"
+      ("q" "Quit" matisse-quit)
+      ("i" "Interrupt" matisse-interrupt)
+      ("C" "Clear" matisse-clear)
+      ("k" "Compact" matisse-compact)]
+     ["History"
+      ("h" "Show" matisse-history-show)
+      ("H" "Complete" matisse-history-complete)]
+     ["Config"
+      ("m" "Model" matisse-set-model)
+      ("M" "Cycle permission mode" matisse-cycle-permission-mode :transient t)
+      ("t" "Temperature" matisse-set-temperature)]
+     ["Display"
+      ("p" "Progress" matisse-toggle-progress-indicators)
+      ("f" "File changes" matisse-toggle-file-changes)
+      ("P" "Performance" matisse-toggle-performance-summary)
+      ("y" "Icons mode" matisse-set-progress-icons-mode)]
+     ["Utility"
+      ("d" "Stderr" matisse-show-stderr)
+      ("T" "Tokens" matisse-show-tokens)
+      ("i" "Yank media" yank-media)]]))
+
+(defun matisse-menu ()
+  "Show the Matisse transient menu.
+If transient is available, shows an interactive menu.
+Otherwise, displays available commands in the echo area."
+  (interactive)
+  (if (fboundp 'matisse-transient-menu)
+      (matisse-transient-menu)
+    (message "Transient not available. Commands: q-quit C-clear k-compact c-cancel h-history m-model t-temp p/f/P-toggles d-debug T-tokens ?-help")))
+;;;; Minor Mode
+(defvar matisse-mode-map
+  (let ((map (make-sparse-keymap)))
+    (when matisse-prefix-key
+      (define-key map (kbd matisse-prefix-key) matisse-command-map))
+    map)
+  "Keymap for `matisse-mode'.")
+
+(defun matisse--cleanup-on-kill ()
+  "Cleanup function called when a matisse buffer is killed.
+Attempts graceful shutdown with fallback to hard kill."
+  (when matisse--process
+    (if (process-live-p matisse--process)
+        (progn
+          ;; Try graceful shutdown: close stdin, send SIGINT
+          (ignore-errors
+            (process-send-eof matisse--process))
+          (ignore-errors
+            (interrupt-process matisse--process))
+
+          ;; Fallback to SIGTERM after 2 seconds
+          (run-at-time 2 nil
+                       (lambda (proc)
+                         (when (and proc (process-live-p proc))
+                           (signal-process proc 'SIGTERM)
+                           ;; Final fallback to SIGKILL after 1 more second
+                           (run-at-time 1 nil
+                                        (lambda (p)
+                                          (when (and p (process-live-p p))
+                                            (delete-process p)))
+                                        proc)))
+                       matisse--process))
+      ;; Process already dead, just clear reference
+      (setq matisse--process nil)))
+
+  ;; Clean up state
+  (setq matisse--pending-json ""
+        matisse--conversation-id nil
+        matisse--message-count 0
+        matisse--shell-context nil
+        matisse--waiting-for-response nil
+        matisse--active-tools nil
+        matisse--progress-buffer ""
+        matisse--interrupted-session-id nil
+        matisse--interrupted-tools nil
+        matisse--pending-message nil
+        matisse--current-model nil)
+  (matisse--stop-spinner)
+  ;; Clean up selection timer
+  (when matisse--selection-timer
+    (cancel-timer matisse--selection-timer)
+    (setq matisse--selection-timer nil)))
+
+(defun matisse--kill-all-processes ()
+  "Immediately kill all matisse processes on Emacs exit.
+This ensures Emacs can exit promptly without waiting for cleanup timers."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and (boundp 'matisse--process)
+                 matisse--process
+                 (process-live-p matisse--process))
+        (delete-process matisse--process)))))
+
+;; Register hook to kill all processes on Emacs exit
+(add-hook 'kill-emacs-hook #'matisse--kill-all-processes)
+
+(define-minor-mode matisse-mode
+  "Minor mode for Matisse Claude Code interface."
+  :lighter (:eval matisse--mode-line-format)
+  :global nil
+  :keymap matisse-mode-map
+  (if matisse-mode
+      (progn
+        (matisse--update-mode-line)
+        ;; Update mode line for matisse-mode activation
+        ;; Add buffer-local kill hook to do full cleanup
+        (add-hook 'kill-buffer-hook #'matisse--cleanup-on-kill nil t)
+        ;; Add global hook for selection tracking
+        (add-hook 'post-command-hook #'matisse--track-selection-change))
+    (progn
+      (when matisse--spinner-timer
+        (cancel-timer matisse--spinner-timer)
+        (setq matisse--spinner-timer nil))
+      ;; Remove the kill hook
+      (remove-hook 'kill-buffer-hook #'matisse--cleanup-on-kill t)
+      ;; Remove selection tracking hook when no matisse buffers are active
+      (unless (cl-some (lambda (buffer)
+                         (with-current-buffer buffer
+                           matisse-mode))
+                       (buffer-list))
+        (remove-hook 'post-command-hook #'matisse--track-selection-change)))))
+
+(defun matisse--get-current-model ()
+  "Get the current model to use for this session."
+  (or matisse--current-model matisse-default-model))
+
+(defun matisse--get-api-key ()
+  "Get the API key for Claude Code."
+  (cond
+   ((functionp matisse-api-key)
+    (funcall matisse-api-key))
+   ((stringp matisse-api-key)
+    matisse-api-key)
+   ((getenv "ANTHROPIC_API_KEY")
+    (getenv "ANTHROPIC_API_KEY"))
+   (t
+    ;; Try auth-source
+    (require 'auth-source)
+    (let ((auth (car (auth-source-search :host "anthropic.com"
+                                         :user "apikey"
+                                         :require '(:secret)))))
+      (when auth
+        (funcall (plist-get auth :secret)))))))
+
+(defun matisse--validate-setup ()
+  "Validate that Claude Code is properly set up."
+  (unless (executable-find matisse-claude-code-path)
+    (error "Claude Code executable not found at: %s" matisse-claude-code-path))
+  (unless (matisse--get-api-key)
+    (error "No API key configured. Set `matisse-api-key' or use auth-source")))
+
+;;;; Major Mode
 (define-derived-mode matisse-shell-mode fundamental-mode "Matisse-Shell"
   "Major mode for matisse shell interactions.
 Provides a clean interface for Claude interactions with visual feedback."
@@ -4020,32 +6030,38 @@ Provides a clean interface for Claude interactions with visual feedback."
 
   ;; Initialize local variables for state management
   (setq-local matisse--message-counter 0
-              matisse--pending-messages nil
+              matisse--message-queue nil  ; Unified queue
               matisse--history nil
               matisse--history-index nil
               matisse--current-input ""
               matisse--output-start-marker (make-marker)
               matisse--message-sections (make-hash-table :test 'equal)
-              matisse--pending-images nil)
+              matisse--pending-images nil
+              matisse--pending-large-paste nil
+              matisse--large-paste-counter 0
+              matisse--temp-files nil
+              matisse--permission-decision nil
+              matisse--current-permission-message nil)
 
-  ;; Key bindings
-  (local-set-key (kbd "RET") #'matisse--handle-return)
-  (local-set-key (kbd "S-<return>") #'matisse--newline)
-  (local-set-key (kbd "<up>") #'matisse-history-previous)
-  (local-set-key (kbd "<down>") #'matisse-history-next)
-  (local-set-key (kbd "M-p") #'matisse-history-previous)
-  (local-set-key (kbd "M-n") #'matisse-history-next)
-  (local-set-key (kbd "M-r") #'matisse-history-search-backward)
-  (local-set-key (kbd "M-s") #'matisse-history-search-forward)
-  (local-set-key (kbd "C-c mh") #'matisse-history-show)
-  (local-set-key (kbd "C-c C-r") #'matisse-history-complete)
-  (local-set-key (kbd "C-c C-c") #'matisse-cancel)
-  (local-set-key (kbd "C-l") #'matisse--clear-buffer)
-  (local-set-key (kbd "C-a") #'matisse-bol)
-  (local-set-key (kbd "C-c mr") #'matisse-refresh-overlays)
-  (local-set-key (kbd "C-c md") #'matisse-debug-code-blocks)
-  (local-set-key (kbd "C-c mi") #'yank-media)
-  
+  ;; Key bindings using customizable keys (standard Emacs conventions)
+  (local-set-key (kbd matisse-key-return) #'matisse--handle-return)
+  (local-set-key (kbd matisse-key-newline) #'matisse--newline)
+  (local-set-key (kbd matisse-key-history-previous) #'matisse-history-previous)
+  (local-set-key (kbd matisse-key-history-next) #'matisse-history-next)
+  (local-set-key (kbd matisse-key-history-previous-alt) #'matisse-history-previous)
+  (local-set-key (kbd matisse-key-history-next-alt) #'matisse-history-next)
+  (local-set-key (kbd matisse-key-history-search-backward) #'matisse-history-search-backward)
+  (local-set-key (kbd matisse-key-history-search-forward) #'matisse-history-search-forward)
+  (local-set-key (kbd matisse-key-clear-buffer) #'matisse-clear-buffer)
+  (local-set-key (kbd matisse-key-beginning-of-line) #'matisse-bol)
+
+  ;; Bind matisse-command-map to the prefix key if configured
+  (when matisse-prefix-key
+    (local-set-key (kbd matisse-prefix-key) matisse-command-map))
+
+  ;; Bind interrupt command
+  (local-set-key (kbd "C-c C-c") #'matisse-interrupt)
+
   ;; Apply overlay-based highlighting
   (matisse--overlays-put)
 
@@ -4060,17 +6076,24 @@ Provides a clean interface for Claude interactions with visual feedback."
   ;; Enable matisse-mode for mode-line enhancements and progress indicators
   (matisse-mode 1)
 
+  ;; Override mode line if configured
+  (when matisse-override-mode-line
+    (setq-local mode-line-format
+                (list '(:eval matisse--mode-line-left)
+                      'mode-line-format-right-align
+                      '(:eval matisse--mode-line-right))))
+
   ;; Add hooks
   (add-hook 'post-command-hook #'matisse--post-command-scroll nil t)
   (add-hook 'kill-buffer-hook #'matisse--kill-buffer-hook nil t)
 
+  ;; Enable slash command completion
+  (add-hook 'completion-at-point-functions
+            #'matisse--slash-command-completion-at-point nil t)
+
   ;; Register yank-media handler for images (Emacs 29+)
   (when (fboundp 'yank-media-handler)
     (yank-media-handler "image/.*" #'matisse--image-yank-media-handler)))
-
-(provide 'matisse-shell)
-
-;;; matisse-shell.el ends here
 
 (provide 'matisse)
 ;;; matisse.el ends here
