@@ -3611,7 +3611,7 @@ Returns nil if valid, error message string otherwise."
 
 ;;;; Public Commands
 ;;;###autoload
-(defun matisse-start ()
+(defun matisse-start-in-project ()
   "Create a new Matisse Claude Code shell session.
 Starts in the project root if in a project, otherwise in `default-directory'."
   (interactive)
@@ -3627,6 +3627,10 @@ Starts in the project root if in a project, otherwise in `default-directory'."
     (with-current-buffer buffer
       (setq default-directory initial-dir))
     buffer))
+
+;;;###autoload
+(defalias 'matisse 'matisse-start-in-project
+  "Alias for `matisse-start-in-project'.")
 
 ;;;###autoload
 (defun matisse-start-in-directory (directory)
@@ -3657,7 +3661,7 @@ Prompts for the directory to use, defaulting to `default-directory'."
     (cond
      ((null matisse-buffers)
       (message "No matisse shell buffers found, creating new one...")
-      (matisse-start))
+      (matisse-start-in-project))
      ((= (length matisse-buffers) 1)
       (switch-to-buffer (car matisse-buffers)))
      (t
@@ -3914,7 +3918,7 @@ Uses existing shell if available, otherwise creates a new one."
                            (car shell-buffers))
                           ;; Create new shell if none exist
                           (t
-                           (matisse-start)
+                           (matisse-start-in-project)
                            ;; Find the newly created buffer
                            (car (seq-filter (lambda (buf)
                                              (with-current-buffer buf
