@@ -131,6 +131,7 @@ When non-nil, all messages are displayed in their entirety."
   :group 'matisse)
 
 ;;;; Matisse Icons
+;;;;; General Icon Settings
 (defgroup matisse-icons nil
   "Progress indicator icons and display settings."
   :group 'matisse)
@@ -552,6 +553,108 @@ Uses light green color to indicate success."
 Uses pink/red color to indicate rejection."
   :type 'face
   :group 'matisse-nerd-icon-faces)
+
+;;;; Message Display Faces
+(defface matisse-header-face
+  '((t :inherit font-lock-comment-face :weight bold))
+  "Face for header text."
+  :group 'matisse)
+
+(defface matisse-prompt-character-face
+  '((t :inherit minibuffer-prompt :weight bold))
+  "Face for the prompt character."
+  :group 'matisse)
+
+(defface matisse-prompt-inactive-face
+  '((t :inherit shadow :weight normal))
+  "Face for inactive/previous prompts."
+  :group 'matisse)
+
+(defface matisse-user-message-face
+  '((t :inherit font-lock-string-face))
+  "Face for user messages."
+  :group 'matisse)
+
+(defface matisse-message-header-face
+  '((t :inherit font-lock-function-name-face :weight bold))
+  "Face for message headers."
+  :group 'matisse)
+
+(defface matisse-response-face
+  '((t :inherit default))
+  "Face for Claude responses."
+  :group 'matisse)
+
+(defface matisse-status-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for status indicators."
+  :group 'matisse)
+
+(defface matisse-info-face
+  '((t :inherit font-lock-doc-face))
+  "Face for info text."
+  :group 'matisse)
+
+(defface matisse-markdown-bold-face
+  '((t :weight bold))
+  "Face for markdown bold text."
+  :group 'matisse)
+
+(defface matisse-markdown-italic-face
+  '((t :slant italic))
+  "Face for markdown italic text."
+  :group 'matisse)
+
+(defface matisse-markdown-header-1-face
+  '((t :inherit font-lock-function-name-face :weight bold :height 1.3))
+  "Face for markdown level 1 headers."
+  :group 'matisse)
+
+(defface matisse-markdown-header-2-face
+  '((t :inherit font-lock-function-name-face :weight bold :height 1.2))
+  "Face for markdown level 2 headers."
+  :group 'matisse)
+
+(defface matisse-markdown-header-3-face
+  '((t :inherit font-lock-function-name-face :weight bold :height 1.1))
+  "Face for markdown level 3 headers."
+  :group 'matisse)
+
+(defface matisse-markdown-inline-code-face
+  '((t :inherit font-lock-constant-face))
+  "Face for markdown inline code."
+  :group 'matisse)
+
+(defface matisse-markdown-bullet-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for markdown bullet characters."
+  :group 'matisse)
+
+(defface matisse-accept-mode-face
+  '((t :foreground "medium purple" :weight bold))
+  "Face for accept/bypass permission mode indicator."
+  :group 'matisse)
+
+(defface matisse-default-mode-face
+  '((t :inherit shadow :weight bold))
+  "Face for default permission mode indicator."
+  :group 'matisse)
+
+(defface matisse-permission-prompt-face
+  '((t :inherit warning :weight bold))
+  "Face for in-buffer permission prompts."
+  :group 'matisse)
+
+;;;; Markdown Display Options
+(defcustom matisse-markdown-hide-emphasis-markers t
+  "Whether to hide markdown emphasis markers like ** and *."
+  :type 'boolean
+  :group 'matisse)
+
+(defcustom matisse-markdown-fontify-headers t
+  "Whether to apply special formatting to markdown headers."
+  :type 'boolean
+  :group 'matisse)
 
 ;;;; Keybindings
 (defgroup matisse-keybindings nil
@@ -4160,107 +4263,6 @@ Returns the mode symbol if found, nil otherwise."
           (message "DEBUG: Found mode: %s" (or result "none")))
         result))))
 
-;;;; Face Definitions
-(defface matisse-header-face
-  '((t :inherit font-lock-comment-face :weight bold))
-  "Face for header text."
-  :group 'matisse)
-
-(defface matisse-prompt-character-face
-  '((t :inherit minibuffer-prompt :weight bold))
-  "Face for the prompt character."
-  :group 'matisse)
-
-(defface matisse-prompt-inactive-face
-  '((t :inherit shadow :weight normal))
-  "Face for inactive/previous prompts."
-  :group 'matisse)
-
-(defface matisse-user-message-face
-  '((t :inherit font-lock-string-face))
-  "Face for user messages."
-  :group 'matisse)
-
-(defface matisse-message-header-face
-  '((t :inherit font-lock-function-name-face :weight bold))
-  "Face for message headers."
-  :group 'matisse)
-
-(defface matisse-response-face
-  '((t :inherit default))
-  "Face for Claude responses."
-  :group 'matisse)
-
-(defface matisse-status-face
-  '((t :inherit font-lock-keyword-face))
-  "Face for status indicators."
-  :group 'matisse)
-
-(defface matisse-info-face
-  '((t :inherit font-lock-doc-face))
-  "Face for info text."
-  :group 'matisse)
-
-(defface matisse-markdown-bold-face
-  '((t :weight bold))
-  "Face for markdown bold text."
-  :group 'matisse)
-
-(defface matisse-markdown-italic-face
-  '((t :slant italic))
-  "Face for markdown italic text."
-  :group 'matisse)
-
-(defface matisse-markdown-header-1-face
-  '((t :inherit font-lock-function-name-face :weight bold :height 1.3))
-  "Face for markdown level 1 headers."
-  :group 'matisse)
-
-(defface matisse-markdown-header-2-face
-  '((t :inherit font-lock-function-name-face :weight bold :height 1.2))
-  "Face for markdown level 2 headers."
-  :group 'matisse)
-
-(defface matisse-markdown-header-3-face
-  '((t :inherit font-lock-function-name-face :weight bold :height 1.1))
-  "Face for markdown level 3 headers."
-  :group 'matisse)
-
-(defface matisse-markdown-inline-code-face
-  '((t :inherit font-lock-constant-face))
-  "Face for markdown inline code."
-  :group 'matisse)
-
-(defface matisse-markdown-bullet-face
-  '((t :inherit font-lock-keyword-face))
-  "Face for markdown bullet characters."
-  :group 'matisse)
-
-(defface matisse-accept-mode-face
-  '((t :foreground "medium purple" :weight bold))
-  "Face for accept/bypass permission mode indicator."
-  :group 'matisse)
-
-(defface matisse-default-mode-face
-  '((t :inherit shadow :weight bold))
-  "Face for default permission mode indicator."
-  :group 'matisse)
-
-(defface matisse-permission-prompt-face
-  '((t :inherit warning :weight bold))
-  "Face for in-buffer permission prompts."
-  :group 'matisse)
-
-;;;; Customization Variables
-(defcustom matisse-markdown-hide-emphasis-markers t
-  "Whether to hide markdown emphasis markers like ** and *."
-  :type 'boolean
-  :group 'matisse)
-
-(defcustom matisse-markdown-fontify-headers t
-  "Whether to apply special formatting to markdown headers."
-  :type 'boolean
-  :group 'matisse)
 
 ;;;; Overlay-based Highlighting
 (defun matisse--position-in-ranges-p (position ranges)
