@@ -5084,7 +5084,7 @@ end of buffer."
             (put-text-property prompt-start (+ prompt-start (length (matisse--get-icon :prompt))) 'face 'matisse-prompt-character-face)
             ;; Make entire prompt read-only
             (put-text-property prompt-start (point) 'read-only t)
-            (put-text-property prompt-start (point) 'rear-nonsticky '(read-only)))
+            (put-text-property prompt-start (point) 'rear-nonsticky '(read-only face)))
           (matisse--debug-log "Prompt inserted, now at point %d" (point)))
 
         ;; Position cursor for input
