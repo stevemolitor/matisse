@@ -5843,24 +5843,25 @@ Use \\[describe-keymap] to see all available commands.")
 (when (featurep 'transient)
   (transient-define-prefix matisse-transient-menu ()
     "Matisse Commands Menu"
-    [["Sessions"
-      ("s" "Start in project" matisse)
-      ("S" "Start in directory..." matisse-start-in-directory)
+    [["Session Management"
+      ("s" "Start" matisse)
+      ("S" "Start in directory" matisse-start-in-directory)
       ("w" "Select session" matisse-select-session)
       ("r" "Resume session" matisse-resume)
-      ("c" "Continue last" matisse-continue)]
-     ["Actions & Config"
-      ("t" "Toggle visibility" matisse-toggle)
+      ("c" "Continue last" matisse-continue)
+      ("q" "Quit" matisse-quit)]
+     ["Conversation Control"
       ("e" "Send message" matisse-send)
-      ("q" "Quit" matisse-quit)
       ("i" "Interrupt" matisse-interrupt)
       ("C" "Clear conversation" matisse-clear)
       ("k" "Compact context" matisse-compact)
+      ("y" "Yank media" yank-media)]
+     ["Settings & Display"
       ("m" "Set model" matisse-set-model)
       ("M" "Cycle permission" matisse-cycle-permission-mode :transient t)
+      ("t" "Toggle matisse window" matisse-toggle)
       ("P" "Toggle performance" matisse-toggle-performance-summary)
-      ("T" "Show tokens" matisse-show-tokens)
-      ("y" "Yank media" yank-media)]]))
+      ("T" "Show tokens" matisse-show-tokens)]]))
 
 (defun matisse-menu ()
   "Show the Matisse transient menu.
