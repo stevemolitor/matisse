@@ -5873,19 +5873,37 @@ Use \\[describe-keymap] to see all available commands.")
 (when (featurep 'transient)
   (transient-define-prefix matisse-transient-menu ()
     "Matisse Commands Menu"
-    [["Session"
+    [["Session Management"
+      ("s" "Start new session" matisse-start-in-directory)
+      ("w" "Switch session" matisse-shell-switch)
+      ("l" "List sessions" matisse-shell-list)
+      ("r" "Resume session" matisse-resume)
+      ("c" "Continue last session" matisse-continue)]
+     ["Remote Control"
+      ("t" "Toggle visibility" matisse-toggle)
+      ("S" "Send message" matisse-send)
+      ("x" "Exit session" matisse-exit)]
+     ["Session Actions"
       ("q" "Quit" matisse-quit)
       ("i" "Interrupt" matisse-interrupt)
       ("C" "Clear" matisse-clear)
       ("k" "Compact" matisse-compact)]
-     ["Config"
-      ("m" "Model" matisse-set-model)
+     ["Configuration"
+      ("m" "Set model" matisse-set-model)
+      ("p" "Set permission mode" matisse-set-permission-mode)
       ("M" "Cycle permission mode" matisse-cycle-permission-mode :transient t)]
-     ["Display"
-      ("P" "Performance" matisse-toggle-performance-summary)]
+     ["Display & Info"
+      ("P" "Toggle performance" matisse-toggle-performance-summary)
+      ("T" "Show tokens" matisse-show-tokens)]
+     ["History"
+      ("n" "Next" matisse-history-next)
+      ("p" "Previous" matisse-history-previous)
+      ("<up>" "Previous" matisse-history-previous)
+      ("<down>" "Next" matisse-history-next)
+      ("/" "Search backward" matisse-history-search-backward)
+      ("?" "Search forward" matisse-history-search-forward)]
      ["Utility"
-      ("T" "Tokens" matisse-show-tokens)
-      ("i" "Yank media" yank-media)]]))
+      ("y" "Yank media" yank-media)]]))
 
 (defun matisse-menu ()
   "Show the Matisse transient menu.
