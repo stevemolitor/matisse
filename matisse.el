@@ -5995,6 +5995,19 @@ This ensures Emacs can exit promptly without waiting for cleanup timers."
         ;; Remove buffer switch tracking when no matisse buffers
         (remove-hook 'buffer-list-update-hook #'matisse--track-buffer-switch)))))
 
+;;;###autoload
+(define-minor-mode matisse-global-mode
+  "Global minor mode for Matisse remote control commands.
+Enables global keybindings for controlling matisse sessions from any buffer.
+Commands like `matisse-toggle', `matisse-send', and `matisse-exit' work
+globally using intelligent directory-based session selection."
+  :global t
+  :lighter ""
+  :keymap (let ((map (make-sparse-keymap)))
+            (when matisse-prefix-key
+              (define-key map (kbd matisse-prefix-key) matisse-command-map))
+            map))
+
 (defun matisse--get-current-model ()
   "Get the current model to use for this session."
   (or matisse--current-model matisse-default-model))
