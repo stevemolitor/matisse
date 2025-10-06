@@ -862,6 +862,11 @@ This is a fallback list used before discovery completes.")
     ("--help" . "Show help for compact command"))
   "Options available for the /compact command.")
 
+;;;; Remote Control State Variables
+(defvar matisse--buffer-mru-list nil
+  "List of matisse buffer names in most-recently-used order.
+The first element is the most recently used matisse buffer.")
+
 ;;;; Buffer-Local State Variables
 (defvar-local matisse--process nil
   "The Claude Code process.")
@@ -3896,36 +3901,147 @@ MODE can be \\='emoji, \\='nerd-icons, or \\='ascii."
              ('nerd-icons "Nerd Font icons")
              ('ascii "ASCII only"))))
 
+;;;; Remote Control Helper Functions
+
+(defun matisse--update-mru (buffer)
+  "Update the MRU list to mark BUFFER as most recently used.
+BUFFER can be a buffer object or buffer name."
+  (let ((buf-name (if (bufferp buffer)
+                      (buffer-name buffer)
+                    buffer)))
+    ;; Remove buffer from list if already present
+    (setq matisse--buffer-mru-list
+          (delq buf-name (delete buf-name matisse--buffer-mru-list)))
+    ;; Add to front of list
+    (push buf-name matisse--buffer-mru-list)))
+
+(defun matisse--get-buffer-directory (buffer)
+  "Get the initial directory for matisse BUFFER.
+Returns the directory from the buffer's matisse--shell-context,
+or nil if not available."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (boundp 'matisse--shell-context)
+        (plist-get matisse--shell-context :initial-directory)))))
+
+(defun matisse--find-target-buffer ()
+  "Find the most appropriate matisse buffer based on directory context.
+Uses the following priority:
+1. Matisse buffer(s) in current `default-directory' (returns MRU)
+2. Matisse buffer(s) in parent directories (walking up tree, returns MRU)
+3. Most recently used matisse buffer globally
+4. nil if no matisse buffers exist"
+  (let* ((all-matisse-buffers
+          (seq-filter (lambda (buf)
+                        (with-current-buffer buf
+                          (derived-mode-p 'matisse-shell-mode)))
+                      (buffer-list)))
+         (current-dir (expand-file-name default-directory)))
+
+    (if (null all-matisse-buffers)
+        nil
+
+      ;; Helper to find buffer in specific directory
+      (cl-labels ((find-in-directory (dir)
+                    (let ((matches (seq-filter
+                                   (lambda (buf)
+                                     (when-let* ((buf-dir (matisse--get-buffer-directory buf)))
+                                       (string-equal (expand-file-name buf-dir) dir)))
+                                   all-matisse-buffers)))
+                      (when matches
+                        ;; Return first match in MRU order
+                        (cl-find-if (lambda (buf)
+                                     (member (buffer-name buf) matisse--buffer-mru-list))
+                                   matches
+                                   ;; If not in MRU list, return first match
+                                   :default (car matches)))))
+                  (parent-directory (dir)
+                    (let ((parent (file-name-directory (directory-file-name dir))))
+                      (unless (string-equal parent dir)
+                        parent))))
+
+        ;; Try current directory
+        (or (find-in-directory current-dir)
+
+            ;; Walk up directory tree
+            (let ((dir current-dir)
+                  result)
+              (while (and dir (not result))
+                (setq dir (parent-directory dir))
+                (when dir
+                  (setq result (find-in-directory dir))))
+              result)
+
+            ;; Fall back to global MRU
+            (cl-find-if (lambda (buf-name)
+                         (and (get-buffer buf-name)
+                              (buffer-live-p (get-buffer buf-name))
+                              (with-current-buffer buf-name
+                                (derived-mode-p 'matisse-shell-mode))))
+                       matisse--buffer-mru-list)
+
+            ;; Last resort: first matisse buffer
+            (car all-matisse-buffers))))))
+
+(defun matisse--track-buffer-switch ()
+  "Track buffer switches to maintain MRU list."
+  (when (derived-mode-p 'matisse-shell-mode)
+    (matisse--update-mru (current-buffer))))
+
+;;;; Remote Control Commands
+;; Commands for controlling matisse sessions from any buffer
+
+;;;###autoload
+(defun matisse-toggle ()
+  "Show or hide the appropriate matisse buffer.
+Uses directory-based selection to find the most relevant matisse session.
+If the buffer is visible, hides it; if hidden, shows and switches to it.
+Does not create a new session if none exists."
+  (interactive)
+  (if-let* ((target-buffer (matisse--find-target-buffer)))
+      (if-let* ((window (get-buffer-window target-buffer t)))
+          ;; Buffer is visible - delete the window
+          (progn
+            (delete-window window)
+            (message "Matisse buffer hidden"))
+        ;; Buffer is not visible - show and switch to it
+        (pop-to-buffer target-buffer)
+        (message "Switched to matisse buffer"))
+    (message "No matisse session found")))
+
 ;;;###autoload
 (defun matisse-send (message)
-  "Send MESSAGE to a matisse-shell buffer and submit it.
-Uses existing shell if available, otherwise creates a new one."
+  "Send MESSAGE to appropriate matisse buffer and submit it.
+Uses directory-based selection to find the most relevant session.
+Creates a new session if none exists."
   (interactive "sMessage for Matisse: ")
-  (let* ((shell-buffers (seq-filter (lambda (buf)
-                                     (with-current-buffer buf
-                                       (derived-mode-p 'matisse-shell-mode)))
-                                   (buffer-list)))
-         (matisse-buffer (cond
-                          ;; Use existing shell if only one exists
-                          ((= (length shell-buffers) 1)
-                           (car shell-buffers))
-                          ;; Use most recent shell if multiple exist
-                          ((> (length shell-buffers) 1)
-                           (car shell-buffers))
-                          ;; Create new shell if none exist
-                          (t
-                           (matisse)
-                           ;; Find the newly created buffer
-                           (car (seq-filter (lambda (buf)
-                                             (with-current-buffer buf
-                                               (derived-mode-p 'matisse-shell-mode)))
-                                           (buffer-list)))))))
-    (with-current-buffer matisse-buffer
-      ;; Insert the message at the prompt
-      (goto-char (point-max))
-      (insert message)
-      ;; Submit the message using our custom handler
-      (matisse--handle-return))))
+  (let ((matisse-buffer (or (matisse--find-target-buffer)
+                            ;; Create new session if none found
+                            (progn
+                              (matisse)
+                              ;; Return the newly created buffer
+                              (matisse--find-target-buffer)))))
+    (when matisse-buffer
+      (with-current-buffer matisse-buffer
+        ;; Track this buffer usage
+        (matisse--update-mru (current-buffer))
+        ;; Insert the message at the prompt
+        (goto-char (point-max))
+        (insert message)
+        ;; Submit the message using our custom handler
+        (matisse--handle-return)))))
+
+;;;###autoload
+(defun matisse-exit ()
+  "Exit (kill) the appropriate matisse session.
+Uses directory-based selection to find the most relevant session.
+The buffer's cleanup hooks will handle process termination."
+  (interactive)
+  (if-let* ((target-buffer (matisse--find-target-buffer)))
+      (progn
+        (kill-buffer target-buffer)
+        (message "Matisse session exited"))
+    (user-error "No matisse session found")))
 
 ;;;###autoload
 (defun matisse-quit ()
@@ -5040,6 +5156,9 @@ SHELL-CONTEXT contains integration information from main matisse system."
       ;; Initialize shell mode
       (matisse-shell-mode)
 
+      ;; Track new buffer in MRU list
+      (matisse--update-mru buffer)
+
       ;; Switch to the buffer
       (switch-to-buffer buffer)
 
@@ -5212,6 +5331,9 @@ end of buffer."
 
          ;; Normal message processing
          (t
+          ;; Track this buffer usage
+          (matisse--update-mru (current-buffer))
+
           ;; Show new prompt for async input
           (matisse--insert-prompt)
 
@@ -5913,6 +6035,10 @@ Otherwise, displays available commands in the echo area."
 (defun matisse--cleanup-on-kill ()
   "Cleanup function called when a matisse buffer is killed.
 Attempts graceful shutdown with fallback to hard kill."
+  ;; Remove from MRU list
+  (setq matisse--buffer-mru-list
+        (delq (buffer-name) (delete (buffer-name) matisse--buffer-mru-list)))
+
   (when matisse--process
     (if (process-live-p matisse--process)
         (progn
@@ -5980,7 +6106,9 @@ This ensures Emacs can exit promptly without waiting for cleanup timers."
         ;; Add buffer-local kill hook to do full cleanup
         (add-hook 'kill-buffer-hook #'matisse--cleanup-on-kill nil t)
         ;; Add global hook for selection tracking
-        (add-hook 'post-command-hook #'matisse--track-selection-change))
+        (add-hook 'post-command-hook #'matisse--track-selection-change)
+        ;; Add global hook for buffer switch tracking
+        (add-hook 'buffer-list-update-hook #'matisse--track-buffer-switch))
     (progn
       (when matisse--spinner-timer
         (cancel-timer matisse--spinner-timer)
@@ -5992,7 +6120,9 @@ This ensures Emacs can exit promptly without waiting for cleanup timers."
                          (with-current-buffer buffer
                            matisse-mode))
                        (buffer-list))
-        (remove-hook 'post-command-hook #'matisse--track-selection-change)))))
+        (remove-hook 'post-command-hook #'matisse--track-selection-change)
+        ;; Remove buffer switch tracking when no matisse buffers
+        (remove-hook 'buffer-list-update-hook #'matisse--track-buffer-switch)))))
 
 (defun matisse--get-current-model ()
   "Get the current model to use for this session."
