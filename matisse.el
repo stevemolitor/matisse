@@ -5896,13 +5896,6 @@ Use \\[describe-keymap] to see all available commands.")
      ["Display & Info"
       ("P" "Toggle performance" matisse-toggle-performance-summary)
       ("T" "Show tokens" matisse-show-tokens)]
-     ["History"
-      ("n" "Next" matisse-history-next)
-      ("p" "Previous" matisse-history-previous)
-      ("<up>" "Previous" matisse-history-previous)
-      ("<down>" "Next" matisse-history-next)
-      ("/" "Search backward" matisse-history-search-backward)
-      ("?" "Search forward" matisse-history-search-forward)]
      ["Utility"
       ("y" "Yank media" yank-media)]]))
 
