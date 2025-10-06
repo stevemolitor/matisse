@@ -3743,18 +3743,6 @@ Starts in the project root if in a project, otherwise in `default-directory'."
       (switch-to-buffer buffer))))
 
 ;;;###autoload
-(defun matisse-shell-list ()
-  "List all active matisse shell buffers."
-  (interactive)
-  (let ((matisse-buffers (seq-filter (lambda (buf)
-                                       (with-current-buffer buf
-                                         (derived-mode-p 'matisse-shell-mode)))
-                                     (buffer-list))))
-    (if matisse-buffers
-        (message "Active matisse shell buffers: %s"
-                 (mapconcat #'buffer-name matisse-buffers ", "))
-      (message "No active matisse shell buffers"))))
-
 (defun matisse--reset ()
   "Reset the Matisse session."
   (when matisse--process
@@ -5877,7 +5865,6 @@ Use \\[describe-keymap] to see all available commands.")
       ("s" "Start in project" matisse)
       ("S" "Start in directory..." matisse-start-in-directory)
       ("w" "Switch session" matisse-shell-switch)
-      ("l" "List sessions" matisse-shell-list)
       ("r" "Resume session" matisse-resume)
       ("c" "Continue last session" matisse-continue)]
      ["Remote Control"
