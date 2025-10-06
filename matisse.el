@@ -2696,12 +2696,11 @@ JSON-OBJ is the parsed JSON system message object from Claude Code."
           (setq matisse--available-commands
                 (mapcar (lambda (cmd) (concat "/" cmd))
                         (append slash-commands nil)))))
-      ;; Immediately request full commands list and models for more detailed info
-      (matisse--debug-log "Requesting commands and models after init")
-      (let ((commands-sent (matisse--send-control-request "get_commands"))
-            (models-sent (matisse--send-control-request "get_models")))
-        (matisse--debug-log "Commands request sent: %s, Models request sent: %s"
-                           commands-sent models-sent)))
+      ;; Immediately request full commands list for more detailed info
+      ;; Note: get_commands response may also include models
+      (matisse--debug-log "Requesting commands after init")
+      (let ((commands-sent (matisse--send-control-request "get_commands")))
+        (matisse--debug-log "Commands request sent: %s" commands-sent)))
 
      ((equal subtype "compact_boundary")
       (let ((compact-metadata (alist-get 'compactMetadata json-obj)))
@@ -2735,10 +2734,9 @@ REQUEST is the parsed JSON control request."
      ((equal subtype "can_use_tool")
       (matisse--handle-can-use-tool-request process request-id request-data))
 
-     ;; Ignore echoed get_models/get_commands requests
-     ;; These are requests WE sent that Claude is echoing back
-     ((or (equal subtype "get_models")
-          (equal subtype "get_commands"))
+     ;; Ignore echoed get_commands request
+     ;; This is a request WE sent that Claude is echoing back
+     ((equal subtype "get_commands")
       (matisse--debug-log "Ignoring echoed control request: %s" subtype))
 
      ;; Unknown request type
