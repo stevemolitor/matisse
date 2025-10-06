@@ -3657,8 +3657,9 @@ Prompts for the directory to use, defaulting to `default-directory'."
     buffer))
 
 ;;;###autoload
-(defun matisse-shell-switch ()
-  "Switch to an existing matisse shell buffer, or create a new one if none exist."
+(defun matisse-select-session ()
+  "Select and switch to a matisse session, or create a new one if none exist.
+Provides interactive selection when multiple sessions are available."
   (interactive)
   (let ((matisse-buffers (seq-filter (lambda (buf)
                                        (with-current-buffer buf
@@ -3673,7 +3674,7 @@ Prompts for the directory to use, defaulting to `default-directory'."
      (t
       ;; Multiple buffers - let user choose
       (let* ((buffer-names (mapcar #'buffer-name matisse-buffers))
-             (selected (completing-read "Switch to matisse shell: " buffer-names nil t)))
+             (selected (completing-read "Select matisse session: " buffer-names nil t)))
         (when selected
           (switch-to-buffer selected)))))))
 
@@ -3984,18 +3985,6 @@ Creates a new session if none exists."
         (insert message)
         ;; Submit the message using our custom handler
         (matisse--handle-return)))))
-
-;;;###autoload
-(defun matisse-exit ()
-  "Exit (kill) the appropriate matisse session.
-Uses directory-based selection to find the most relevant session.
-The buffer's cleanup hooks will handle process termination."
-  (interactive)
-  (if-let* ((target-buffer (matisse--find-target-buffer)))
-      (progn
-        (kill-buffer target-buffer)
-        (message "Matisse session exited"))
-    (user-error "No matisse session found")))
 
 ;;;###autoload
 (defun matisse-quit ()
@@ -5854,28 +5843,23 @@ Use \\[describe-keymap] to see all available commands.")
 (when (featurep 'transient)
   (transient-define-prefix matisse-transient-menu ()
     "Matisse Commands Menu"
-    [["Session Management"
+    [["Sessions"
       ("s" "Start in project" matisse)
       ("S" "Start in directory..." matisse-start-in-directory)
-      ("w" "Switch session" matisse-shell-switch)
+      ("w" "Select session" matisse-select-session)
       ("r" "Resume session" matisse-resume)
-      ("c" "Continue last session" matisse-continue)]
-     ["Remote Control"
+      ("c" "Continue last" matisse-continue)]
+     ["Actions & Config"
       ("t" "Toggle visibility" matisse-toggle)
       ("e" "Send message" matisse-send)
-      ("x" "Exit session" matisse-exit)]
-     ["Session Actions"
       ("q" "Quit" matisse-quit)
       ("i" "Interrupt" matisse-interrupt)
-      ("C" "Clear" matisse-clear)
-      ("k" "Compact" matisse-compact)]
-     ["Configuration"
+      ("C" "Clear conversation" matisse-clear)
+      ("k" "Compact context" matisse-compact)
       ("m" "Set model" matisse-set-model)
-      ("M" "Cycle permission mode" matisse-cycle-permission-mode :transient t)]
-     ["Display & Info"
+      ("M" "Cycle permission" matisse-cycle-permission-mode :transient t)
       ("P" "Toggle performance" matisse-toggle-performance-summary)
-      ("T" "Show tokens" matisse-show-tokens)]
-     ["Utility"
+      ("T" "Show tokens" matisse-show-tokens)
       ("y" "Yank media" yank-media)]]))
 
 (defun matisse-menu ()
