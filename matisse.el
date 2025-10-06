@@ -5874,14 +5874,15 @@ Use \\[describe-keymap] to see all available commands.")
   (transient-define-prefix matisse-transient-menu ()
     "Matisse Commands Menu"
     [["Session Management"
-      ("s" "Start new session" matisse-start-in-directory)
+      ("s" "Start in project" matisse)
+      ("S" "Start in directory..." matisse-start-in-directory)
       ("w" "Switch session" matisse-shell-switch)
       ("l" "List sessions" matisse-shell-list)
       ("r" "Resume session" matisse-resume)
       ("c" "Continue last session" matisse-continue)]
      ["Remote Control"
       ("t" "Toggle visibility" matisse-toggle)
-      ("S" "Send message" matisse-send)
+      ("e" "Send message" matisse-send)
       ("x" "Exit session" matisse-exit)]
      ["Session Actions"
       ("q" "Quit" matisse-quit)
