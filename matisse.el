@@ -3091,9 +3091,13 @@ This tells Claude to stop the current operation but keeps the process alive,
 allowing you to immediately send new messages without restarting.
 
 If a message is currently being processed, marks it as cancelled in the queue.
-Also pauses automatic queue processing until you send a new message."
+Also pauses automatic queue processing until you send a new message.
+
+Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive)
-  (if (and matisse--process (process-live-p matisse--process))
+  (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
+      (with-current-buffer target-buffer
+        (if (and matisse--process (process-live-p matisse--process))
       (progn
         ;; Stop UI indicators
         (matisse--stop-spinner)
@@ -3129,6 +3133,7 @@ Also pauses automatic queue processing until you send a new message."
                        (if (= pending-count 1) "" "s"))
             (message "Interrupted Claude"))))
     (message "No active Claude process to interrupt")))
+    (user-error "No matisse session found")))
 
 (defun matisse--graceful-shutdown ()
   "Gracefully shut down the Claude process with signal escalation.
@@ -3776,24 +3781,28 @@ Starts in the project root if in a project, otherwise in `default-directory'."
 ;;;###autoload
 (defun matisse-set-model (model)
   "Set the Claude MODEL to use for this session.
-Switches the model without restarting the process if one is running."
+Switches the model without restarting the process if one is running.
+Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive
    (list (let* ((choices '(("Default" . nil)
                            ("Sonnet" . "sonnet")
                            ("Opus" . "opus")))
                 (selection (completing-read "Model: " choices nil t)))
            (cdr (assoc selection choices)))))
-  (let ((old-model (or matisse--current-model matisse-default-model)))
-    (setq matisse--current-model model)
-    ;; If we have an active process, send control request to switch model
-    (if (and matisse--process (process-live-p matisse--process))
-        (if model
-            (progn
-              (matisse--send-control-request "set_model" `((model . ,model)))
-              (message "Switching model from %s to %s" old-model model))
-          (message "Cannot switch to default model while process is running"))
-      ;; No active process, just update the setting
-      (message "Model set to %s for next session" (or model "default")))))
+  (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
+      (with-current-buffer target-buffer
+        (let ((old-model (or matisse--current-model matisse-default-model)))
+          (setq matisse--current-model model)
+          ;; If we have an active process, send control request to switch model
+          (if (and matisse--process (process-live-p matisse--process))
+              (if model
+                  (progn
+                    (matisse--send-control-request "set_model" `((model . ,model)))
+                    (message "Switching model from %s to %s" old-model model))
+                (message "Cannot switch to default model while process is running"))
+            ;; No active process, just update the setting
+            (message "Model set to %s for next session" (or model "default")))))
+    (user-error "No matisse session found")))
 
 ;;;###autoload
 (defun matisse-set-permission-mode (mode)
@@ -3834,15 +3843,19 @@ Switches the mode without restarting the process if one is running."
 
 ;;;###autoload
 (defun matisse-cycle-permission-mode ()
-  "Cycle through permission modes: default -> plan -> bypass -> default."
+  "Cycle through permission modes: default -> plan -> bypass -> default.
+Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive)
-  (let* ((current (or matisse--current-permission-mode matisse-permission-mode))
-         (next (cond
-                ((string= current "default") "plan")
-                ((string= current "plan") "bypassPermissions")
-                ((string= current "bypassPermissions") "default")
-                (t "default"))))
-    (matisse-set-permission-mode next)))
+  (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
+      (with-current-buffer target-buffer
+        (let* ((current (or matisse--current-permission-mode matisse-permission-mode))
+               (next (cond
+                      ((string= current "default") "plan")
+                      ((string= current "plan") "bypassPermissions")
+                      ((string= current "bypassPermissions") "default")
+                      (t "default"))))
+          (matisse-set-permission-mode next)))
+    (user-error "No matisse session found")))
 
 ;;;###autoload
 (defun matisse-toggle-performance-summary ()
@@ -3942,6 +3955,15 @@ Uses the following priority:
 ;;;; Remote Control Commands
 ;; Commands for controlling matisse sessions from any buffer
 
+(defun matisse--get-target-buffer-or-current ()
+  "Get the target matisse buffer.
+If already in a matisse buffer, returns current buffer.
+Otherwise, uses directory-based selection to find appropriate buffer.
+Returns nil if no matisse buffer exists."
+  (if (derived-mode-p 'matisse-shell-mode)
+      (current-buffer)
+    (matisse--find-target-buffer)))
+
 ;;;###autoload
 (defun matisse-toggle ()
   "Show or hide the appropriate matisse buffer.
@@ -3996,35 +4018,38 @@ The buffer's cleanup hooks will handle process termination."
 
 ;;;###autoload
 (defun matisse-quit ()
-  "Quit Matisse by killing the process and buffer."
+  "Quit Matisse by killing the process and buffer.
+Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive)
-  ;; Just kill the buffer - the kill-buffer-hook will handle all the cleanup
-  (kill-buffer (current-buffer)))
+  (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
+      (kill-buffer target-buffer)
+    (user-error "No matisse session found")))
 
 ;;;; Token Tracking Commands
 (defun matisse-show-tokens ()
-  "Show current token usage statistics."
+  "Show current token usage statistics.
+Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive)
-  (let ((percentage (if (> matisse-auto-compact-threshold 0)
-                        (format " (%.0f%% of threshold)"
-                                (* 100.0 (/ (float matisse--tokens-since-compact)
-                                           matisse-auto-compact-threshold)))
-                      "")))
-    (message "Tokens: %d total, %d since last reset%s"
-             matisse--total-tokens-used
-             matisse--tokens-since-compact
-             percentage)))
+  (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
+      (with-current-buffer target-buffer
+        (let ((percentage (if (> matisse-auto-compact-threshold 0)
+                              (format " (%.0f%% of threshold)"
+                                      (* 100.0 (/ (float matisse--tokens-since-compact)
+                                                 matisse-auto-compact-threshold)))
+                            "")))
+          (message "Tokens: %d total, %d since last reset%s"
+                   matisse--total-tokens-used
+                   matisse--tokens-since-compact
+                   percentage)))
+    (user-error "No matisse session found")))
 
 ;;;###autoload
 (defun matisse-clear ()
-  "Clear the conversation history by restarting with a fresh session."
+  "Clear the conversation history by restarting with a fresh session.
+Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive)
-  (let ((matisse-buffer (seq-find (lambda (buf)
-                                    (with-current-buffer buf
-                                      (derived-mode-p 'matisse-shell-mode)))
-                                  (buffer-list))))
-    (if matisse-buffer
-        (with-current-buffer matisse-buffer
+  (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
+      (with-current-buffer target-buffer
           ;; Kill the current process if running
           (when (and matisse--process (process-live-p matisse--process))
             (delete-process matisse--process)
@@ -4068,27 +4093,24 @@ The buffer's cleanup hooks will handle process termination."
           ;; Reinitialize buffer with fresh prompt
           (matisse--initialize-buffer)
 
-          (message "Conversation cleared - starting fresh session"))
-      (message "No active matisse shell. Use M-x matisse-start to start."))))
+        (message "Conversation cleared - starting fresh session"))
+    (user-error "No matisse session found")))
 
 ;;;###autoload
 (defun matisse-compact (&optional instructions)
   "Compact the conversation to save context using the /compact slash command.
-With optional INSTRUCTIONS, provide specific guidance for the compaction."
+With optional INSTRUCTIONS, provide specific guidance for the compaction.
+Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive
    (list (when current-prefix-arg
            (read-string "Compaction instructions: "))))
-  (let ((matisse-buffer (seq-find (lambda (buf)
-                                    (with-current-buffer buf
-                                      (derived-mode-p 'matisse-shell-mode)))
-                                  (buffer-list))))
-    (if matisse-buffer
-        (with-current-buffer matisse-buffer
-          (let ((command (if instructions
-                            (format "/compact --instructions \"%s\"" instructions)
-                          "/compact")))
-            (matisse--process-user-input-internal command)))
-      (message "No active matisse shell. Use M-x matisse-start to start."))))
+  (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
+      (with-current-buffer target-buffer
+        (let ((command (if instructions
+                          (format "/compact --instructions \"%s\"" instructions)
+                        "/compact")))
+          (matisse--process-user-input-internal command)))
+    (user-error "No matisse session found")))
 
 ;;; Session & Shell Management
 ;;;; Message Queue
@@ -5826,23 +5848,14 @@ DATA is the raw image data."
     (define-key map "k" #'matisse-compact) ; kompact
     (define-key map "i" #'matisse-interrupt)
 
-    ;; History
-    (define-key map "h" #'matisse-history-show)
-    (define-key map "H" #'matisse-history-complete)
-
     ;; Configuration
     (define-key map "m" #'matisse-set-model)
     (define-key map "M" #'matisse-cycle-permission-mode)
-    (define-key map "t" #'matisse-set-temperature)
 
     ;; Display Toggles
-    (define-key map "p" #'matisse-toggle-progress-indicators)
-    (define-key map "f" #'matisse-toggle-file-changes)
     (define-key map "P" #'matisse-toggle-performance-summary)
-    (define-key map "y" #'matisse-set-progress-icons-mode)
 
     ;; Utility
-    (define-key map "d" #'matisse-show-stderr) ; debug
     (define-key map "T" #'matisse-show-tokens)
 
     ;; Media
@@ -5881,7 +5894,7 @@ Otherwise, displays available commands in the echo area."
   (interactive)
   (if (fboundp 'matisse-transient-menu)
       (matisse-transient-menu)
-    (message "Transient not available. Commands: q-quit C-clear k-compact c-cancel h-history m-model t-temp p/f/P-toggles d-debug T-tokens ?-help")))
+    (message "Transient not available. Commands: q-quit i-interrupt C-clear k-compact m-model M-cycle-permission P-performance T-tokens")))
 ;;;; Minor Mode
 (defvar matisse-mode-map
   (let ((map (make-sparse-keymap)))
