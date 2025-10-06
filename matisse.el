@@ -3517,24 +3517,25 @@ Called from `post-command-hook' to update the last selection."
                                 (matisse--update-mode-line))))))))
 
 (defun matisse--format-selection-context ()
-  "Format the last selection as a file reference string.
-Returns a string like '@/path/to/file.txt#L5:10-L9:25' or nil if no selection."
+  "Format the last selection with file path and actual text content.
+Does NOT use @ file reference syntax to avoid triggering full file reads.
+Instead, sends the file path, line range, and selected text directly.
+This matches the behavior of monet.el and claude-code-ide.el, which send
+selection content rather than file references to avoid token bloat."
   (when (and matisse-send-selection-p matisse--last-selection)
     (let* ((file-path (alist-get 'file-path matisse--last-selection))
            (start-line (alist-get 'start-line matisse--last-selection))
            (end-line (alist-get 'end-line matisse--last-selection))
-           (start-char (alist-get 'start-char matisse--last-selection))
-           (end-char (alist-get 'end-char matisse--last-selection))
            (has-selection (alist-get 'has-selection matisse--last-selection))
            (selected-text (alist-get 'text matisse--last-selection)))
-      (when file-path
-        (let ((reference (if (and has-selection (not (= start-line end-line)))
-                             (format "@%s#L%d:%d-L%d:%d" file-path start-line start-char end-line end-char)
-                           (format "@%s#L%d:%d" file-path start-line start-char))))
-          ;; Optionally include selected text if there is any
-          (if (and has-selection (not (string-empty-p selected-text)))
-              (format "%s - %s" reference selected-text)
-            reference))))))
+      (when (and file-path has-selection (not (string-empty-p selected-text)))
+        ;; Send file path + line info + actual text (no @ reference)
+        ;; This avoids Claude Code CLI reading the entire file
+        (if (= start-line end-line)
+            (format "File: %s (line %d)\n\n%s"
+                    file-path start-line selected-text)
+          (format "File: %s (lines %d-%d)\n\n%s"
+                  file-path start-line end-line selected-text))))))
 
 (defun matisse--format-selection-status ()
   "Format selection status for mode-line display.
