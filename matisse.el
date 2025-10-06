@@ -3774,15 +3774,6 @@ Starts in the project root if in a project, otherwise in `default-directory'."
     (setq matisse--selection-timer nil)))
 
 ;;;###autoload
-(defun matisse-show-stderr ()
-  "Show the stderr buffer for debugging."
-  (interactive)
-  (let ((stderr-name (format " *matisse-stderr-%s*" (buffer-name))))
-    (if (get-buffer stderr-name)
-        (switch-to-buffer stderr-name)
-      (message "No stderr buffer found for this session"))))
-
-;;;###autoload
 (defun matisse-set-model (model)
   "Set the Claude MODEL to use for this session.
 Switches the model without restarting the process if one is running."
@@ -3854,52 +3845,12 @@ Switches the mode without restarting the process if one is running."
     (matisse-set-permission-mode next)))
 
 ;;;###autoload
-(defun matisse-set-temperature (temp)
-  "Set the temperature TEMP for responses."
-  (interactive "nTemperature (0.0-1.0): ")
-  (setq matisse-temperature (max 0.0 (min 1.0 temp)))
-  (matisse--reset)
-  (message "Temperature set to: %.1f" matisse-temperature))
-
-;;;###autoload
-(defun matisse-toggle-progress-indicators ()
-  "Toggle display of progress indicators."
-  (interactive)
-  (setq matisse-show-progress-indicators (not matisse-show-progress-indicators))
-  (message "Progress indicators %s"
-           (if matisse-show-progress-indicators "enabled" "disabled")))
-
-;;;###autoload
-(defun matisse-toggle-file-changes ()
-  "Toggle display of file change summaries."
-  (interactive)
-  (setq matisse-show-file-changes (not matisse-show-file-changes))
-  (message "File change summaries %s"
-           (if matisse-show-file-changes "enabled" "disabled")))
-
-;;;###autoload
 (defun matisse-toggle-performance-summary ()
   "Toggle display of performance summaries."
   (interactive)
   (setq matisse-show-performance-summary (not matisse-show-performance-summary))
   (message "Performance summaries %s"
            (if matisse-show-performance-summary "enabled" "disabled")))
-
-;;;###autoload
-(defun matisse-set-progress-icons-mode (mode)
-  "Set progress icons display MODE.
-MODE can be \\='emoji, \\='nerd-icons, or \\='ascii."
-  (interactive
-   (list (intern (completing-read "Icons mode: "
-                                  '("emoji" "nerd-icons" "ascii")
-                                  nil t))))
-  (setq matisse-icons-mode mode)
-  (matisse--update-shell-prompt)
-  (message "Progress icons mode set to: %s"
-           (pcase matisse-icons-mode
-             ('emoji "Emoji")
-             ('nerd-icons "Nerd Font icons")
-             ('ascii "ASCII only"))))
 
 ;;;; Remote Control Helper Functions
 
@@ -5375,6 +5326,7 @@ end of buffer."
           (insert "\n")
           ;; Auto-scroll to keep the new line visible
           (matisse--auto-scroll-if-at-end (matisse--user-at-end-p) (current-buffer)))
+      ;; TODO fix "Not in input area" errors
       (message "Not in input area"))))
 
 ;;;; History Management
@@ -5517,92 +5469,6 @@ end of buffer."
                  (if (< direction 0) "previous" "next") (or regexp "[nil]"))))))
 
 ;;;; History Completing Read
-(defun matisse-history-complete ()
-  "Select from history using `completing-read' with fuzzy matching."
-  (interactive)
-  ;; Ensure we're in a matisse shell buffer
-  (unless (derived-mode-p 'matisse-shell-mode)
-    (user-error "Not in a matisse shell buffer"))
-
-  (if (not matisse--history)
-      (message "No history available")
-    ;; Use completing-read to select from history
-    (let* ((history-candidates (cl-remove-duplicates matisse--history :test #'string-equal))
-           (selected (completing-read "History: "
-                                      history-candidates
-                                      nil    ; predicate
-                                      nil    ; require-match (nil allows partial)
-                                      nil    ; initial-input
-                                      nil    ; hist
-                                      (car history-candidates)))) ; default
-      (when (and selected (not (string-empty-p selected)))
-        ;; Replace current input with selected history item
-        (matisse--replace-current-input selected)
-        (message "Selected: %s" (or selected "[nil]"))))))
-
-;;;; History Display
-(defun matisse-history-show ()
-  "Display complete history in a separate buffer for selection."
-  (interactive)
-  ;; Ensure we're in a matisse shell buffer
-  (unless (derived-mode-p 'matisse-shell-mode)
-    (user-error "Not in a matisse shell buffer"))
-
-  ;; Capture history from current shell buffer
-  (let ((shell-buffer (current-buffer))
-        (history-items (copy-sequence matisse--history)))
-    (if (not history-items)
-        (message "No history available")
-      (let ((history-buffer (get-buffer-create "*Matisse History*")))
-        (with-current-buffer history-buffer
-          (setq buffer-read-only nil)
-          (erase-buffer)
-          (insert "Matisse Shell History\n")
-          (insert "===================\n\n")
-          (insert "Press RET to select, q to quit\n\n")
-
-          ;; Insert history items with numbers
-          (let ((index 0))
-            (dolist (item history-items)
-              (insert (format "%3d. %s\n" (1+ index) item))
-              (setq index (1+ index))))
-
-          ;; Set up the buffer for selection
-          (goto-char (point-min))
-          (when (search-forward "1. " nil t)
-            (beginning-of-line))
-
-          ;; Store reference to original shell buffer
-          (setq-local matisse--source-buffer shell-buffer)
-
-          ;; Enable special mode for navigation
-          (matisse-history-display-mode))
-
-        ;; Show the history buffer
-        (pop-to-buffer history-buffer)))))
-
-(define-derived-mode matisse-history-display-mode special-mode "Matisse-History"
-  "Major mode for displaying and selecting from Matisse history."
-  (setq buffer-read-only t)
-  (local-set-key (kbd "RET") #'matisse--history-select-current)
-  (local-set-key (kbd "q") #'quit-window)
-  (local-set-key (kbd "n") #'next-line)
-  (local-set-key (kbd "p") #'previous-line)
-  (local-set-key (kbd "<down>") #'next-line)
-  (local-set-key (kbd "<up>") #'previous-line))
-
-(defun matisse--history-select-current ()
-  "Select the history item at point and return to shell."
-  (interactive)
-  (let ((line (thing-at-point 'line t)))
-    (when (and line (string-match "^\\s-*[0-9]+\\. \\(.*\\)$" line))
-      (let ((selected-text (match-string 1 line))
-            (shell-buffer matisse--source-buffer))
-        (quit-window)
-        (when (and shell-buffer (buffer-live-p shell-buffer))
-          (switch-to-buffer shell-buffer)
-          (when (derived-mode-p 'matisse-shell-mode)
-            (matisse--replace-current-input selected-text)))))))
 
 ;;;; Auto-scroll Utility
 (defun matisse--user-at-end-p ()
@@ -5999,20 +5865,12 @@ Use \\[describe-keymap] to see all available commands.")
       ("i" "Interrupt" matisse-interrupt)
       ("C" "Clear" matisse-clear)
       ("k" "Compact" matisse-compact)]
-     ["History"
-      ("h" "Show" matisse-history-show)
-      ("H" "Complete" matisse-history-complete)]
      ["Config"
       ("m" "Model" matisse-set-model)
-      ("M" "Cycle permission mode" matisse-cycle-permission-mode :transient t)
-      ("t" "Temperature" matisse-set-temperature)]
+      ("M" "Cycle permission mode" matisse-cycle-permission-mode :transient t)]
      ["Display"
-      ("p" "Progress" matisse-toggle-progress-indicators)
-      ("f" "File changes" matisse-toggle-file-changes)
-      ("P" "Performance" matisse-toggle-performance-summary)
-      ("y" "Icons mode" matisse-set-progress-icons-mode)]
+      ("P" "Performance" matisse-toggle-performance-summary)]
      ["Utility"
-      ("d" "Stderr" matisse-show-stderr)
       ("T" "Tokens" matisse-show-tokens)
       ("i" "Yank media" yank-media)]]))
 
