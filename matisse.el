@@ -3499,11 +3499,16 @@ Returns alist with selection data, nil if no file or matisse buffer."
 
 (defun matisse--track-selection-change ()
   "Track selection changes in file buffers.
-Called from `post-command-hook' to update the last selection."
-  (when (and matisse-send-selection-p
-             buffer-file-name
-             ;; Don't track selections from matisse shell buffers
-             (not (string-match-p "\\*matisse\\*" (buffer-name))))
+Called from `post-command-hook' to update the last selection.
+Clears selection context when in buffers without files (e.g., *scratch*),
+but preserves it when in matisse shell buffers."
+  (cond
+   ;; In matisse shell buffer - preserve existing selection context
+   ((derived-mode-p 'matisse-shell-mode)
+    nil) ; Do nothing, keep matisse--last-selection
+
+   ;; In buffer with file - track selection
+   ((and matisse-send-selection-p buffer-file-name)
     ;; Cancel any existing timer
     (when matisse--selection-timer
       (cancel-timer matisse--selection-timer))
@@ -3514,7 +3519,12 @@ Called from `post-command-hook' to update the last selection."
                             (let ((selection-info (matisse--get-selection-info)))
                               (when selection-info
                                 (setq matisse--last-selection selection-info)
-                                (matisse--update-mode-line))))))))
+                                (matisse--update-mode-line)))))))
+
+   ;; In buffer without file (e.g., *scratch*) - clear selection context
+   ((and matisse-send-selection-p (not buffer-file-name))
+    (setq matisse--last-selection nil)
+    (matisse--update-mode-line))))
 
 (defun matisse--format-selection-context ()
   "Format the last selection with file path and actual text content.
