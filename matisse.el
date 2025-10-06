@@ -3792,16 +3792,9 @@ Works globally - finds the appropriate matisse buffer if not already in one."
             (message "Model set to %s for next session" (or model "default")))))
     (user-error "No matisse session found")))
 
-;;;###autoload
-(defun matisse-set-permission-mode (mode)
+(defun matisse--set-permission-mode (mode)
   "Set the permission MODE for this session.
 Switches the mode without restarting the process if one is running."
-  (interactive
-   (list (let* ((choices '(("Default" . "default")
-                           ("Plan" . "plan")
-                           ("Bypass" . "bypassPermissions")))
-                (selection (completing-read "Permission mode: " choices nil t)))
-           (cdr (assoc selection choices)))))
   (setq matisse--current-permission-mode mode)
   ;; Mark that we have a pending permission update to send in next control response
   (setq matisse--pending-permission-update mode)
@@ -3842,7 +3835,7 @@ Works globally - finds the appropriate matisse buffer if not already in one."
                       ((string= current "plan") "bypassPermissions")
                       ((string= current "bypassPermissions") "default")
                       (t "default"))))
-          (matisse-set-permission-mode next)))
+          (matisse--set-permission-mode next)))
     (user-error "No matisse session found")))
 
 ;;;###autoload
@@ -5878,7 +5871,6 @@ Use \\[describe-keymap] to see all available commands.")
       ("k" "Compact" matisse-compact)]
      ["Configuration"
       ("m" "Set model" matisse-set-model)
-      ("p" "Set permission mode" matisse-set-permission-mode)
       ("M" "Cycle permission mode" matisse-cycle-permission-mode :transient t)]
      ["Display & Info"
       ("P" "Toggle performance" matisse-toggle-performance-summary)
