@@ -5047,9 +5047,8 @@ FULL-START to FULL-END is the entire [text](url) pattern."
   (when (and matisse--output-start-marker (point))
     (set-marker matisse--output-start-marker (point)))
 
-  ;; Start process immediately to load models and commands
-  (unless (and matisse--process (process-live-p matisse--process))
-    (matisse--start-process))
+  ;; Note: Process will start lazily when first message is sent
+  ;; Commands and models will be loaded after init message arrives
 
   ;; Insert initial prompt
   (matisse--insert-prompt))
