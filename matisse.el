@@ -2756,15 +2756,11 @@ REQUEST-DATA contains tool_name, input, and permission_suggestions."
 
     ;; First check if tool should be auto-allowed (bypass mode or read-only tools)
     (if (matisse--should-auto-allow-tool tool-name)
-        ;; Auto-allowed - send response immediately
-        (let ((response `((behavior . "allow")
-                         (updatedInput . ,tool-input))))
-          ;; Include pending permission mode update if user cycled mode
-          (when matisse--pending-permission-update
-            (setq response (append response
-                                  `((updatedPermissions . ((permissionMode . ,matisse--pending-permission-update))))))
-            (setq matisse--pending-permission-update nil))
-          (matisse--send-control-response process request-id response))
+        ;; Auto-allowed - send response immediately without pending permission updates
+        ;; (pending updates only apply to user-prompted permission decisions)
+        (matisse--send-control-response process request-id
+                                        `((behavior . "allow")
+                                          (updatedInput . ,tool-input)))
 
       ;; Not auto-allowed - prompt user based on mode
       (if matisse-in-buffer-permission-prompts
@@ -5113,14 +5109,22 @@ SHELL-CONTEXT contains integration information from main matisse system."
   "Return (start . end) of current input region.
 Works with multiline input - finds the last prompt in buffer and goes to
 end of buffer."
-  (save-excursion
-    (goto-char (point-max))
-    ;; Search backward for the most recent prompt
-    (when (re-search-backward matisse--shell-prompt-regex nil t)
-      (let ((start (+ (point) (length matisse--shell-prompt))) ; After prompt
-            (end (point-max)))
-        (when (>= end start)
-          (cons start end))))))
+  (or
+   ;; First try: find the most recent prompt
+   (save-excursion
+     (goto-char (point-max))
+     (when (re-search-backward matisse--shell-prompt-regex nil t)
+       (let ((start (+ (point) (length matisse--shell-prompt))) ; After prompt
+             (end (point-max)))
+         (when (>= end start)
+           (cons start end)))))
+   ;; Fallback: if point is after output marker and not in read-only region,
+   ;; we're likely at a fresh input area (prompt just inserted)
+   (when (and (boundp 'matisse--output-start-marker)
+              matisse--output-start-marker
+              (>= (point) matisse--output-start-marker)
+              (not (get-text-property (point) 'read-only)))
+     (cons matisse--output-start-marker (point-max)))))
 
 ;;;; Input Handling & Prompt Management
 (defun matisse--insert-prompt ()
