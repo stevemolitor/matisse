@@ -2695,7 +2695,13 @@ JSON-OBJ is the parsed JSON system message object from Claude Code."
           ;; Add "/" prefix to each command for consistency with completion system
           (setq matisse--available-commands
                 (mapcar (lambda (cmd) (concat "/" cmd))
-                        (append slash-commands nil))))))
+                        (append slash-commands nil)))))
+      ;; Immediately request full commands list and models for more detailed info
+      (matisse--debug-log "Requesting commands and models after init")
+      (let ((commands-sent (matisse--send-control-request "get_commands"))
+            (models-sent (matisse--send-control-request "get_models")))
+        (matisse--debug-log "Commands request sent: %s, Models request sent: %s"
+                           commands-sent models-sent)))
 
      ((equal subtype "compact_boundary")
       (let ((compact-metadata (alist-get 'compactMetadata json-obj)))
@@ -3296,20 +3302,17 @@ Returns the created process object."
                         (if resume-session-id " with resume" "")
                         (process-live-p matisse--process))
 
-    ;; Claude Code CLI auto-initializes on startup, no need to send initialize request
-    ;; Request available models and commands after a short delay
-    (let ((process matisse--process)
-          (buffer (current-buffer))
-          (desired-mode current-permission-mode))
-      (run-at-time 0.2 nil
-                   (lambda ()
-                     (when (and process (process-live-p process))
-                       (with-current-buffer buffer
-                         ;; Request models and commands
-                         (matisse--send-control-request "get_models")
-                         (matisse--send-control-request "get_commands")
-                         ;; Set permission mode if needed
-                         (unless (string= desired-mode "default")
+    ;; Claude Code CLI auto-initializes on startup and sends init message
+    ;; Models and commands will be requested when we receive the init message
+    ;; Set permission mode if needed (must wait for init)
+    (unless (string= current-permission-mode "default")
+      (let ((process matisse--process)
+            (buffer (current-buffer))
+            (desired-mode current-permission-mode))
+        (run-at-time 0.2 nil
+                     (lambda ()
+                       (when (and process (process-live-p process))
+                         (with-current-buffer buffer
                            (matisse--send-control-request "set_permission_mode"
                                                          `((mode . ,desired-mode)))
                            (matisse--debug-log "Set initial permission mode to: %s" desired-mode)))))))
@@ -5045,6 +5048,10 @@ FULL-START to FULL-END is the entire [text](url) pattern."
   ;; Set output start marker - ensure point is valid
   (when (and matisse--output-start-marker (point))
     (set-marker matisse--output-start-marker (point)))
+
+  ;; Start process immediately to load models and commands
+  (unless (and matisse--process (process-live-p matisse--process))
+    (matisse--start-process))
 
   ;; Insert initial prompt
   (matisse--insert-prompt))
