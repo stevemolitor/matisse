@@ -776,24 +776,47 @@ Smaller values make faster blinking, larger values make slower blinking."
   :type 'number
   :group 'matisse)
 
-(defcustom matisse-auto-compact-threshold 30000
-  "Trigger compaction suggestion or auto-compact after this many tokens.
-Lowered from 50K to 30K to trigger compaction earlier and prevent
-approaching API limits. This is roughly 25% of a 200K context window."
+(defcustom matisse-context-window 200000
+  "Context window size in tokens for current model.
+Used to calculate auto-compact and warning thresholds.
+Common values:
+- 200000 (200K) - Sonnet 4.5, Opus 4, default models
+- 1000000 (1M) - Models with [1m] suffix (e.g., claude-sonnet-4-5[1m])
+Adjust based on your model's actual context window."
   :type 'integer
   :group 'matisse)
 
-(defcustom matisse-auto-compact-enabled nil
-  "When non-nil, automatically trigger /compact when threshold is reached.
-When nil, only suggest compaction to the user (default behavior).
+(defcustom matisse-auto-compact-reserve 13000
+  "Reserve tokens before context limit to trigger auto-compact.
+Auto-compact triggers when: tokens_used >= (context_window - reserve).
+Default 13000 matches Claude Code SDK behavior.
+Examples:
+- 200K context: triggers at 187K tokens
+- 1M context: triggers at 987K tokens"
+  :type 'integer
+  :group 'matisse)
 
-When enabled, Matisse will automatically send the /compact command when
-token usage exceeds `matisse-auto-compact-threshold'. The current user
-message will be queued and sent after compaction completes.
+(defcustom matisse-warning-reserve 20000
+  "Reserve tokens before context limit to show warning.
+Warning shows when: tokens_used >= (context_window - reserve).
+Default 20000 matches Claude Code SDK behavior.
+Examples:
+- 200K context: warns at 180K tokens
+- 1M context: warns at 980K tokens"
+  :type 'integer
+  :group 'matisse)
 
-Note: Auto-compaction can take 10-30 seconds. Consider setting
-`matisse-auto-compact-threshold' lower to compact earlier and avoid
-hitting API limits during the compaction process."
+(defcustom matisse-auto-compact-enabled t
+  "When non-nil, automatically trigger /compact at threshold.
+Default t (enabled) matches Claude Code SDK default behavior.
+
+When enabled, Matisse automatically sends /compact when token usage
+exceeds (context_window - auto_compact_reserve). Messages are queued
+during compaction and sent afterward.
+
+Set to nil if you prefer manual /compact control.
+
+Note: Auto-compaction takes 10-30 seconds but prevents context overflow."
   :type 'boolean
   :group 'matisse)
 
@@ -2294,8 +2317,8 @@ JSON-OBJ is the result message containing usage data."
       (setq matisse--total-tokens-used (+ matisse--total-tokens-used total-this-turn))
       (setq matisse--tokens-since-compact (+ matisse--tokens-since-compact total-this-turn))
 
-      ;; Check if we should suggest compaction
-      (when (> matisse--tokens-since-compact matisse-auto-compact-threshold)
+      ;; Check if we should suggest compaction (warn before auto-compact triggers)
+      (when (> matisse--tokens-since-compact (matisse--warning-threshold))
         (matisse--suggest-compaction))
 
       (matisse--debug-log "Tokens this turn: %d (total: %d, since compact: %d)"
@@ -2307,17 +2330,39 @@ JSON-OBJ is the result message containing usage data."
       (matisse--update-mode-line))))
 
 (defun matisse--suggest-compaction ()
-  "Suggest to user that they should compact the conversation."
+  "Suggest compaction or inform about upcoming auto-compact."
   (when matisse--shell-context
     (funcall (plist-get matisse--shell-context :write-output)
-             "\n⚠️  Context is getting long (>50k tokens). Consider starting a fresh conversation.\n"))
-  (message "Tip: Context is getting long. Consider starting a fresh conversation"))
+             (if matisse-auto-compact-enabled
+                 (format "\n⚠️  Context at %dk tokens (will auto-compact at %dk)...\n"
+                        (/ matisse--tokens-since-compact 1000)
+                        (/ (matisse--auto-compact-threshold) 1000))
+               (format "\n⚠️  Context at %dk tokens. Consider /compact or enable auto-compact.\n"
+                      (/ matisse--tokens-since-compact 1000)))))
+  (message (if matisse-auto-compact-enabled
+               (format "Context at %dk tokens (auto-compact at %dk)"
+                      (/ matisse--tokens-since-compact 1000)
+                      (/ (matisse--auto-compact-threshold) 1000))
+             "Context is getting long. Consider /compact or enable auto-compact")))
 
 (defun matisse--reset-token-count ()
   "Reset the tokens-since-compact counter."
   (setq matisse--tokens-since-compact 0)
   ;; Update mode line to reflect the reset
   (force-mode-line-update))
+
+;;;; Threshold Calculations (SDK-style)
+(defun matisse--auto-compact-threshold ()
+  "Calculate auto-compact threshold dynamically.
+Returns: context_window - auto_compact_reserve.
+Matches SDK's calculation: y11() - WD0 (context - 13000)."
+  (- matisse-context-window matisse-auto-compact-reserve))
+
+(defun matisse--warning-threshold ()
+  "Calculate warning threshold dynamically.
+Returns: context_window - warning_reserve.
+Matches SDK's warning threshold calculation."
+  (- matisse-context-window matisse-warning-reserve))
 
 (defun matisse--estimate-tokens (text)
   "Estimate token count for TEXT using fast approximation.
@@ -2332,9 +2377,10 @@ Returns estimated token count as integer."
   "Format token usage for mode line display."
   (when (and matisse-show-token-usage (> matisse--tokens-since-compact 0))
     (let* ((tokens-k (/ matisse--tokens-since-compact 1000))
-           (percentage (if (> matisse-auto-compact-threshold 0)
+           (threshold (matisse--auto-compact-threshold))
+           (percentage (if (> threshold 0)
                            (* 100.0 (/ (float matisse--tokens-since-compact)
-                                      matisse-auto-compact-threshold))
+                                      threshold))
                          0))
            (face (cond
                   ((>= percentage 90) '(:inherit error :weight bold))
@@ -3507,43 +3553,70 @@ to read data and prevent pipe buffer from filling up."
 
 (defun matisse--send-message-internal (text)
   "Internal function to format and send TEXT message to Claude Code process.
-Does not check for auto-compact conditions - use matisse--send-message-async
-for that."
-  (condition-case err
+Checks for auto-compact before sending (matches SDK's pre-API-call check)."
+  ;; Auto-compact check BEFORE sending (like SDK does before API call)
+  (if (and matisse-auto-compact-enabled
+           (> matisse--tokens-since-compact (matisse--auto-compact-threshold))
+           (not (string-prefix-p "/" text))
+           (not matisse--auto-compact-in-progress))
+      ;; Trigger auto-compact instead of sending
       (progn
-        ;; Ensure process is still alive
-        (unless (and matisse--process (process-live-p matisse--process))
-          (matisse--start-process))
+        (matisse--debug-log "Auto-compact threshold reached (%d > %d), triggering before send"
+                            matisse--tokens-since-compact
+                            (matisse--auto-compact-threshold))
+        (setq matisse--auto-compact-in-progress t)
+        (when matisse--shell-context
+          (funcall (plist-get matisse--shell-context :write-output)
+                   "\n⚙️  Auto-compacting conversation (threshold reached)...\n"))
+        ;; Send /compact first
+        (let ((json-msg (matisse--format-user-message "/compact")))
+          (when json-msg
+            (process-send-string matisse--process (concat json-msg "\n"))))
+        ;; Re-enqueue original message to send AFTER compact completes
+        (matisse--enqueue-message text))
 
-        (let ((json-msg (matisse--format-user-message text)))
-          (if json-msg
-              (progn
-                (matisse--debug-log "Sending JSON: %s" json-msg)
-                (matisse--debug-log "Process alive before send: %s" (process-live-p matisse--process))
+    ;; Normal send path
+    (condition-case err
+        (progn
+          ;; Ensure process is still alive
+          (unless (and matisse--process (process-live-p matisse--process))
+            (matisse--start-process))
+
+          (let ((json-msg (matisse--format-user-message text)))
+            (if json-msg
+                (progn
+                  (matisse--debug-log "Sending JSON: %s" json-msg)
+                  (matisse--debug-log "Process alive before send: %s" (process-live-p matisse--process))
                 (let ((full-msg (concat json-msg "\n")))
                   (if (> (length full-msg) matisse-chunk-threshold)
                       (progn
                         (matisse--debug-log "Using chunked sending for large message (%d bytes)" (length full-msg))
                         (matisse--send-string-chunked matisse--process full-msg))
                     (process-send-string matisse--process full-msg)))
-                (matisse--debug-log "Process alive after send: %s" (process-live-p matisse--process)))
-            ;; json-msg is nil, meaning command was handled locally
-            (matisse--debug-log "Command handled locally, not sending to Claude"))))
-    (error
-     ;; Stop the spinner and reset state
-     (matisse--stop-spinner)
-     (setq matisse--waiting-for-response nil
-           matisse--pending-message nil)
-     ;; Display error message in echo area
-     (message "Matisse error: %s" (error-message-string err))
-     (matisse--debug-log "Error in matisse--send-message-internal: %s" (error-message-string err)))))
+                  (matisse--debug-log "Process alive after send: %s" (process-live-p matisse--process)))
+              ;; json-msg is nil, meaning command was handled locally
+              (matisse--debug-log "Command handled locally, not sending to Claude"))))
+      (error
+       ;; Stop the spinner and reset state
+       (matisse--stop-spinner)
+       (setq matisse--waiting-for-response nil
+             matisse--pending-message nil)
+       ;; Display error message in echo area
+       (message "Matisse error: %s" (error-message-string err))
+       (matisse--debug-log "Error in matisse--send-message-internal: %s" (error-message-string err))))))
 
 (defun matisse--send-compact-command ()
-  "Send /compact command to trigger auto-compaction."
-  (when matisse--shell-context
-    (funcall (plist-get matisse--shell-context :write-output)
-             "\n⚙️  Auto-compacting conversation (threshold reached)...\n"))
-  (matisse--send-message-internal "/compact"))
+  "Send /compact command directly without auto-compact check."
+  ;; Send /compact directly, bypassing auto-compact logic
+  (condition-case err
+      (progn
+        (unless (and matisse--process (process-live-p matisse--process))
+          (matisse--start-process))
+        (let ((json-msg (matisse--format-user-message "/compact")))
+          (when json-msg
+            (process-send-string matisse--process (concat json-msg "\n")))))
+    (error
+     (matisse--debug-log "Error sending compact command: %s" (error-message-string err)))))
 
 (defun matisse--send-message-async (text)
   "Asynchronously format and send TEXT message to Claude Code process."
@@ -4106,11 +4179,12 @@ Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive)
   (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
       (with-current-buffer target-buffer
-        (let ((percentage (if (> matisse-auto-compact-threshold 0)
-                              (format " (%.0f%% of threshold)"
-                                      (* 100.0 (/ (float matisse--tokens-since-compact)
-                                                 matisse-auto-compact-threshold)))
-                            "")))
+        (let* ((threshold (matisse--auto-compact-threshold))
+               (percentage (if (> threshold 0)
+                               (format " (%.0f%% of threshold)"
+                                       (* 100.0 (/ (float matisse--tokens-since-compact)
+                                                  threshold)))
+                             "")))
           (message "Tokens: %d total, %d since last reset%s"
                    matisse--total-tokens-used
                    matisse--tokens-since-compact
