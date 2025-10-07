@@ -40,6 +40,12 @@ Analyzed Claude Code SDK v2.0.9 and implemented 3 proven context management feat
 - Append system prompt encouraging aggressive subagent usage
 - Both help keep large file reads in separate context windows
 
+### Bonus: Unlimited Message Queue
+- Discovered Matisse already had sophisticated queue system (lines 4272-4396)
+- Integrated auto-compact with existing queue
+- Now supports **unlimited queued messages** while Claude is working
+- Matches ACP's Pushable pattern without protocol overhead
+
 ---
 
 ## How to Use

@@ -6,10 +6,21 @@
 
 ## Quick Answer
 
-**Async Queueing**: ✓ YES - ACP supports it via `Pushable` input streams
-**Simplify/Complicate**: BOTH - Less context code, but more protocol code
+**Async Queueing**: ✓ MATISSE ALREADY HAS IT - Discovered existing sophisticated queue (lines 4272-4396)
+**Simplify/Complicate**: Would COMPLICATE - Add ~800-1300 lines for minimal benefit
 **Lose Features**: SOME - Would need ACP protocol extensions
-**Recommendation**: **Not worth it** - Current implementation is simpler
+**Recommendation**: **Definitely not worth it** - Matisse already has ACP-equivalent features!
+
+## Update: Matisse Already Has Unlimited Queue!
+
+During implementation, discovered Matisse has a **complete queue system** (lines 4272-4396):
+- Message structures with IDs, types, statuses
+- `matisse--enqueue-message` - Add to queue
+- `matisse--dequeue-message` - Get next pending
+- `matisse--process-queue` - Automatic processing
+- Integrated with shell and response handling
+
+**This is already equivalent to ACP's Pushable!** No need to switch to ACP.
 
 ---
 
