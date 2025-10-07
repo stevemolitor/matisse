@@ -982,8 +982,13 @@ Included as updatedPermissions in next control_response.")
 (defvar-local matisse--tokens-since-compact 0
   "Tokens used since last compaction.")
 
-(defvar-local matisse--pending-user-message nil
-  "User message queued while waiting for auto-compact to complete.")
+(defvar-local matisse--message-queue nil
+  "Queue of user messages waiting to be sent.
+Messages are queued when:
+- Auto-compaction is in progress
+- Waiting for response from previous message
+Processed in FIFO order (first in, first out).
+Similar to ACP's Pushable stream pattern.")
 
 (defvar-local matisse--auto-compact-in-progress nil
   "Non-nil when auto-compaction is in progress.")
@@ -1003,8 +1008,6 @@ Plist with :text and :placeholder-text.")
   "List of session-scoped temp files created for large arguments.
 Files persist for session lifetime to support follow-up questions and resume.
 Cleaned up only on explicit /clear command.")
-
-(defvar-local matisse--message-queue)
 
 (defvar-local matisse--shell-prompt nil
   "The prompt string to use in matisse shell.")
@@ -2763,23 +2766,19 @@ JSON-OBJ is the parsed JSON system message object from Claude Code."
         ;; Reset token count after successful compaction
         (matisse--reset-token-count)
 
-        ;; Handle queued message after auto-compact completes
+        ;; Handle queued messages after auto-compact completes
         (when matisse--auto-compact-in-progress
           (setq matisse--auto-compact-in-progress nil)
-          (when matisse--pending-user-message
-            (let ((queued-message matisse--pending-user-message)
-                  (current-buf (current-buffer)))
-              (setq matisse--pending-user-message nil)
-              (matisse--debug-log "Auto-compact completed, sending queued message")
+          (let ((pending-count (cl-count-if (lambda (msg)
+                                              (eq (plist-get msg :status) 'pending))
+                                           matisse--message-queue)))
+            (when (> pending-count 0)
+              (matisse--debug-log "Auto-compact completed, %d messages queued" pending-count)
               (when matisse--shell-context
                 (funcall (plist-get matisse--shell-context :write-output)
-                         "\n✓ Compaction complete, sending queued message...\n"))
-              ;; Send queued message after short delay to ensure clean state
-              (run-at-time 0.5 nil
-                           (lambda ()
-                             (when (buffer-live-p current-buf)
-                               (with-current-buffer current-buf
-                                 (matisse--send-message-internal queued-message))))))))))
+                         (format "\n✓ Compaction complete, processing %d queued %s...\n"
+                                pending-count
+                                (if (= pending-count 1) "message" "messages")))))))))
 
      (t
       (matisse--debug-log "Unknown system message subtype: %s, content: %s" subtype content)
@@ -3570,31 +3569,40 @@ Checks for auto-compact conditions before sending."
       ;; Update mode line to reflect new token count
       (force-mode-line-update)))
 
-  ;; Check if we should auto-compact or queue the message
+  ;; Check if we should auto-compact before queueing/sending
   (cond
-   ;; Already compacting - queue this message
-   (matisse--auto-compact-in-progress
-    (matisse--debug-log "Auto-compact in progress, queueing message")
-    (setq matisse--pending-user-message text)
-    (when matisse--shell-context
-      (funcall (plist-get matisse--shell-context :write-output)
-               "\n⏳ Message queued (waiting for compaction to complete)...\n")))
-
    ;; Threshold reached and auto-compact enabled - skip for slash commands
    ((and matisse-auto-compact-enabled
          (> matisse--tokens-since-compact matisse-auto-compact-threshold)
-         (not (string-prefix-p "/" text)))
+         (not (string-prefix-p "/" text))
+         (not matisse--auto-compact-in-progress))
     (matisse--debug-log "Auto-compact threshold reached (%d > %d), triggering compaction"
                         matisse--tokens-since-compact
                         matisse-auto-compact-threshold)
     ;; Queue user message and trigger compact
-    (setq matisse--pending-user-message text)
+    (matisse--enqueue-message text)
     (setq matisse--auto-compact-in-progress t)
     (matisse--send-compact-command))
 
-   ;; Normal message sending
+   ;; Normal case - use the existing unified queue system
    (t
-    (matisse--send-message-internal text))))
+    ;; Enqueue the message (existing queue handles busy/idle states)
+    (matisse--enqueue-message text)
+
+    ;; Show queue status if busy
+    (when (or matisse--auto-compact-in-progress
+              (matisse--get-current-message))
+      (let ((pending-count (cl-count-if (lambda (msg)
+                                          (eq (plist-get msg :status) 'pending))
+                                       matisse--message-queue)))
+        (when (> pending-count 1)  ; More than just the one we added
+          (when matisse--shell-context
+            (funcall (plist-get matisse--shell-context :write-output)
+                     (format "\n⏳ Message queued (%d in queue)...\n" pending-count))))))
+
+    ;; Process queue if ready (existing queue system decides when to send)
+    (unless (matisse--get-current-message)
+      (matisse--process-queue)))))
 
 ;;;; Selection Tracking
 (defun matisse--get-selection-info ()
