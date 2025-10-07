@@ -29,8 +29,10 @@
 
 ### 5. Compared with ACP
 - Analyzed claude-code-acp implementation
+- Researched xenodium's acp.el + agent-shell
 - Determined switching to ACP not worthwhile
 - Matisse already has equivalent features
+- acp.el is experimental/unstable, would require massive rewrite
 
 ---
 
@@ -89,11 +91,12 @@ matisse-aggressive-subagent-prompt: (encourages subagents)
 
 **Technical Details**:
 3. `IMPLEMENTATION_COMPLETE.md` - Full feature docs
-4. `MATISSE_VS_ACP_COMPARISON.md` - ACP analysis
-5. `ACP_IMPLEMENTATION_ANALYSIS.md` - Why not ACP
+4. `MATISSE_VS_ACP_COMPARISON.md` - claude-code-acp analysis
+5. `ACP_IMPLEMENTATION_ANALYSIS.md` - Initial ACP analysis
+6. `ACP_EL_REANALYSIS.md` - **NEW** xenodium's acp.el deep dive
 
 **Code**:
-6. `matisse.el` - All changes (compiles successfully)
+7. `matisse.el` - All changes (compiles successfully)
 
 ---
 
