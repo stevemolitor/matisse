@@ -2,24 +2,25 @@
 
 **Date**: October 6, 2025
 **Branch**: remote-control
-**Total Commits**: 9
+**Total Commits**: 10
 
 ---
 
 ## What Was Implemented
 
-All 4 SDK-inspired context management features have been successfully implemented and tested (byte-compilation passes).
+Three SDK-inspired context management features have been successfully implemented and tested (byte-compilation passes).
+
+**Note**: Feature 2 (client-side tool result filtering) was implemented then removed because it doesn't actually prevent content from reaching Claude's context - the CLI sends results to Claude before Matisse receives them.
 
 ### ✓ Feature 1: Fast Token Estimation
 - Function: `matisse--estimate-tokens`
 - Uses `length/4` heuristic matching SDK's `z7()` function
 - Enables quick checks without API calls
 
-### ✓ Feature 2: Client-Side Tool Result Filtering
-- Defcustom: `matisse-max-tool-result-tokens` (default: 15000)
-- Blocks tool results exceeding 15K tokens
-- More aggressive than SDK's 25K limit
-- Returns error to Claude instead of large content
+### ✗ Feature 2: Client-Side Tool Result Filtering (REMOVED)
+**Why removed**: Matisse receives tool results AFTER they've already been sent to Claude's context. The CLI validates and sends to Claude API before streaming to Matisse, so client-side filtering in Matisse can't prevent context bloat - it would only affect log files.
+
+**What actually protects context**: CLI's built-in 25K token limit per Read tool (already working).
 
 ### ✓ Feature 3: Proactive Context Tracking
 - Estimates tokens BEFORE sending to API
@@ -39,16 +40,18 @@ All 4 SDK-inspired context management features have been successfully implemente
 ## Commit History
 
 ```
+c82676a Remove client-side tool result filtering (doesn't work as intended)
+e1e26a0 Add implementation completion summary
 f944593 Add context management implementation documentation
 0a05e45 Add message queue handling after auto-compact
 6a943d5 Implement auto-compact trigger logic
 dc316a6 Add auto-compaction configuration and state variables
 87525f8 Add proactive token tracking to message sending
-cad6e99 Integrate tool result filtering in message processing
-d10fe02 Add client-side tool result filtering
 c0c7b13 Add fast token estimation function
 3648894 Add context management improvements and fix token tracking
 ```
+
+Note: Commits `d10fe02` and `cad6e99` (tool filtering) were superseded by `c82676a` which removes that code.
 
 ---
 
@@ -58,11 +61,6 @@ c0c7b13 Add fast token estimation function
 ```elisp
 matisse-auto-compact-enabled        ; nil (default) - set to t to enable
 matisse-auto-compact-threshold      ; 30000 (lowered from 50000)
-```
-
-### Tool Result Filtering
-```elisp
-matisse-max-tool-result-tokens      ; 15000 (default)
 ```
 
 ### Subagent Support (from earlier)
@@ -92,7 +90,7 @@ M-x customize-variable RET matisse-auto-compact-enabled RET
 ### Default Behavior (No Changes Required)
 
 Even without enabling auto-compact, you get:
-- ✓ Tool result filtering (blocks > 15K tokens)
+- ✓ CLI's 25K token limit per Read (prevents huge files)
 - ✓ Proactive token tracking (better visibility)
 - ✓ Earlier compaction suggestions (at 30K vs 50K)
 - ✓ Custom subagent loading from ~/.claude/agents/
@@ -202,11 +200,18 @@ All code includes references to SDK functions (cli.js line numbers) for maintain
 
 ## Success Criteria
 
-✓ All 4 features implemented
+✓ 3 of 4 features implemented (Feature 2 removed - doesn't work in Matisse architecture)
 ✓ Byte-compilation passes
 ✓ Backward compatible (no breaking changes)
 ✓ Configurable (can enable/disable each feature)
 ✓ Documented (plan + implementation + inline comments)
 ✓ Based on proven SDK implementation
+
+**What actually provides context protection:**
+1. Fast token estimation (Feature 1)
+2. CLI's built-in 25K limit per Read (already working)
+3. Proactive token tracking (Feature 3)
+4. Automatic compaction (Feature 4)
+5. Aggressive subagent prompting (earlier implementation)
 
 **Ready for testing and deployment.**

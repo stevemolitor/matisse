@@ -2,7 +2,9 @@
 
 ## Status: COMPLETE ✓
 
-All 4 SDK-inspired context management features have been implemented in Matisse.
+Three SDK-inspired context management features have been implemented in Matisse.
+
+**Note**: Feature 2 (client-side tool result filtering) was removed after implementation because it cannot prevent content from reaching Claude's context - the CLI sends results to Claude before Matisse receives them.
 
 ---
 
@@ -20,7 +22,7 @@ All 4 SDK-inspired context management features have been implemented in Matisse.
 
 ---
 
-## Features Implemented
+## Features Implemented (3 of 4)
 
 ### Feature 1: Fast Token Estimation ✓
 
@@ -41,24 +43,25 @@ Uses the same heuristic as Claude Code CLI (z7 function): string length divided 
 
 ---
 
-### Feature 2: Client-Side Tool Result Filtering ✓
+### Feature 2: Client-Side Tool Result Filtering ✗ (REMOVED)
 
-**Configuration**: `matisse-max-tool-result-tokens` (default: 15000)
-**Location**: matisse.el:94
+**Status**: Implemented then removed (commit c82676a)
 
-**Functions**:
-- `matisse--check-tool-result-size` (line 2268)
-- `matisse--maybe-filter-tool-result` (line 2281)
+**Why removed**:
+Matisse receives tool results AFTER the CLI has already sent them to Claude's API. The message flow is:
 
-**Integration**: matisse.el:3013 (filters before processing)
+1. CLI executes Read tool
+2. CLI validates content (25K token limit)
+3. **CLI sends result to Claude API** ← Content enters Claude's context here
+4. CLI streams messages to Matisse
+5. Matisse would filter here ← Too late!
 
-**Behavior**:
-- Tool results exceeding 15K tokens are replaced with error messages
-- Error tells Claude the content was too large
-- Prevents oversized Read results from bloating context
+**What actually protects context**:
+- ✓ CLI's built-in 25K token limit (already enforced before reaching Claude)
+- ✓ Aggressive subagent prompting (keeps large reads in separate context)
+- ✓ Auto-compaction (reduces overall context size)
 
-**Based on**: SDK's `na2()` function (cli.js:1843) which enforces 25K limit
-**Difference**: Matisse uses 15K (more aggressive) vs SDK's 25K
+**Lesson learned**: Client-side filtering in Matisse can only affect log files, not Claude's active context window.
 
 ---
 
@@ -165,7 +168,7 @@ Uses the same heuristic as Claude Code CLI (z7 function): string length divided 
 | Feature | SDK (cli.js) | Matisse | Notes |
 |---------|--------------|---------|-------|
 | Token Estimation | `z7()` = length/4 | ✓ Same | matisse--estimate-tokens |
-| Tool Result Limit | 25K tokens | 15K tokens | More aggressive |
+| Tool Result Limit | 25K tokens | 25K tokens | Both use CLI enforcement |
 | Proactive Tracking | ✓ DI() | ✓ | Tracks before API call |
 | Auto-Compact Trigger | context - 13K | 30K tokens | Different threshold |
 | Auto-Compact | ✓ (if enabled) | ✓ (opt-in) | Same behavior |
