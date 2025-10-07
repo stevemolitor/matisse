@@ -3008,6 +3008,11 @@ PARAMS contains sessionId and update fields."
             (let ((json-obj (matisse--parse-json-line line)))
               (when json-obj
                 (matisse--debug-log "Parsed JSON: %s" json-obj)
+
+                ;; Filter oversized tool results before processing
+                (when (equal (alist-get 'type json-obj) "user")
+                  (setq json-obj (matisse--maybe-filter-tool-result json-obj)))
+
                 (cond
                  ;; Handle JSON-RPC style notifications (e.g., session/update)
                  ((alist-get 'method json-obj)
