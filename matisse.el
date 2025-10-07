@@ -91,6 +91,16 @@ Set to nil to disable this behavior."
                  (const :tag "Disabled" nil))
   :group 'matisse)
 
+(defcustom matisse-max-tool-result-tokens 15000
+  "Maximum tokens allowed in a single tool result.
+Tool results exceeding this limit will be truncated with a message to Claude.
+The Claude Code CLI enforces 25K tokens per Read, but lowering this to 15K
+helps prevent context bloat more aggressively.
+Set to nil to disable client-side filtering (uses CLI's 25K limit only)."
+  :type '(choice (integer :tag "Token limit")
+                 (const :tag "Disabled (use CLI limit)" nil))
+  :group 'matisse)
+
 (defcustom matisse-streaming t
   "Whether to use streaming responses."
   :type 'boolean
@@ -2254,6 +2264,56 @@ Icon types: :tool, :success, :performance, :command, :permission,
         (seq-find (lambda (item)
                     (equal (alist-get 'type item) "tool_result"))
                   content)))))
+
+(defun matisse--check-tool-result-size (tool-result-content)
+  "Check if TOOL-RESULT-CONTENT exceeds token limits.
+Returns nil if size is acceptable, or an error message string if too large.
+Uses fast token estimation to avoid expensive API calls."
+  (when (and matisse-max-tool-result-tokens
+             tool-result-content
+             (stringp tool-result-content))
+    (let ((estimated-tokens (matisse--estimate-tokens tool-result-content)))
+      (when (> estimated-tokens matisse-max-tool-result-tokens)
+        (format "<tool_use_error>Tool result (%d estimated tokens) exceeds maximum allowed tokens (%d). The content was too large to include. Consider using offset/limit parameters, Grep instead of Read, or breaking this into smaller operations.</tool_use_error>"
+                estimated-tokens
+                matisse-max-tool-result-tokens)))))
+
+(defun matisse--maybe-filter-tool-result (json-obj)
+  "Filter tool result in JSON-OBJ if it exceeds size limits.
+Returns modified JSON-OBJ with truncated content if needed.
+If tool result is within limits, returns JSON-OBJ unchanged."
+  (if (not (equal (alist-get 'type json-obj) "user"))
+      json-obj
+    (let* ((message (alist-get 'message json-obj))
+           (content (alist-get 'content message)))
+      (if (not (vectorp content))
+          json-obj
+        ;; Check each content block for tool_result
+        (let* ((content-list (append content nil))
+               (modified-content
+                (mapcar
+                 (lambda (item)
+                   (if (equal (alist-get 'type item) "tool_result")
+                       (let* ((result-content (alist-get 'content item))
+                              (error-msg (matisse--check-tool-result-size result-content)))
+                         (if error-msg
+                             ;; Replace content with error message
+                             `((type . "tool_result")
+                               (tool_use_id . ,(alist-get 'tool_use_id item))
+                               (content . ,error-msg)
+                               (is_error . t))
+                           item))
+                     item))
+                 content-list)))
+          (if (equal modified-content content-list)
+              json-obj
+            ;; Return modified JSON-OBJ
+            `((type . "user")
+              (message . ((role . "user")
+                         (content . ,(vconcat modified-content))))
+              ,@(seq-filter (lambda (pair)
+                             (not (memq (car pair) '(type message))))
+                           json-obj))))))))
 
 ;;; Process & Protocol
 ;;;; Token Tracking
