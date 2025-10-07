@@ -3569,7 +3569,7 @@ Checks for auto-compact conditions before sending."
       ;; Update mode line to reflect new token count
       (force-mode-line-update)))
 
-  ;; Check if we should auto-compact before queueing/sending
+  ;; Check if we should auto-compact, queue, or send directly
   (cond
    ;; Threshold reached and auto-compact enabled - skip for slash commands
    ((and matisse-auto-compact-enabled
@@ -3584,25 +3584,31 @@ Checks for auto-compact conditions before sending."
     (setq matisse--auto-compact-in-progress t)
     (matisse--send-compact-command))
 
-   ;; Normal case - use the existing unified queue system
-   (t
-    ;; Enqueue the message (existing queue handles busy/idle states)
+   ;; Already processing a message from existing queue - queue this one
+   ((matisse--get-current-message)
+    (matisse--debug-log "Message already processing, queueing new message")
     (matisse--enqueue-message text)
+    (let ((pending-count (cl-count-if (lambda (msg)
+                                        (eq (plist-get msg :status) 'pending))
+                                     matisse--message-queue)))
+      (when matisse--shell-context
+        (funcall (plist-get matisse--shell-context :write-output)
+                 (format "\n⏳ Message queued (%d in queue)...\n" pending-count)))))
 
-    ;; Show queue status if busy
-    (when (or matisse--auto-compact-in-progress
-              (matisse--get-current-message))
-      (let ((pending-count (cl-count-if (lambda (msg)
-                                          (eq (plist-get msg :status) 'pending))
-                                       matisse--message-queue)))
-        (when (> pending-count 1)  ; More than just the one we added
-          (when matisse--shell-context
-            (funcall (plist-get matisse--shell-context :write-output)
-                     (format "\n⏳ Message queued (%d in queue)...\n" pending-count))))))
+   ;; Auto-compact in progress - queue this message
+   (matisse--auto-compact-in-progress
+    (matisse--debug-log "Auto-compact in progress, queueing message")
+    (matisse--enqueue-message text)
+    (let ((pending-count (cl-count-if (lambda (msg)
+                                        (eq (plist-get msg :status) 'pending))
+                                     matisse--message-queue)))
+      (when matisse--shell-context
+        (funcall (plist-get matisse--shell-context :write-output)
+                 (format "\n⏳ Message queued (%d in queue, waiting for compaction)...\n" pending-count)))))
 
-    ;; Process queue if ready (existing queue system decides when to send)
-    (unless (matisse--get-current-message)
-      (matisse--process-queue)))))
+   ;; Not busy - send directly without queueing (avoid loop with existing queue system)
+   (t
+    (matisse--send-message-internal text))))
 
 ;;;; Selection Tracking
 (defun matisse--get-selection-info ()
