@@ -786,9 +786,25 @@ Smaller values make faster blinking, larger values make slower blinking."
   :type 'number
   :group 'matisse)
 
-(defcustom matisse-auto-compact-threshold 50000
-  "Suggest compaction after this many tokens (roughly 25% of context)."
+(defcustom matisse-auto-compact-threshold 30000
+  "Trigger compaction suggestion or auto-compact after this many tokens.
+Lowered from 50K to 30K to trigger compaction earlier and prevent
+approaching API limits. This is roughly 25% of a 200K context window."
   :type 'integer
+  :group 'matisse)
+
+(defcustom matisse-auto-compact-enabled nil
+  "When non-nil, automatically trigger /compact when threshold is reached.
+When nil, only suggest compaction to the user (default behavior).
+
+When enabled, Matisse will automatically send the /compact command when
+token usage exceeds `matisse-auto-compact-threshold'. The current user
+message will be queued and sent after compaction completes.
+
+Note: Auto-compaction can take 10-30 seconds. Consider setting
+`matisse-auto-compact-threshold' lower to compact earlier and avoid
+hitting API limits during the compaction process."
+  :type 'boolean
   :group 'matisse)
 
 (defcustom matisse-show-token-usage t
@@ -975,6 +991,12 @@ Included as updatedPermissions in next control_response.")
 
 (defvar-local matisse--tokens-since-compact 0
   "Tokens used since last compaction.")
+
+(defvar-local matisse--pending-user-message nil
+  "User message queued while waiting for auto-compact to complete.")
+
+(defvar-local matisse--auto-compact-in-progress nil
+  "Non-nil when auto-compaction is in progress.")
 
 (defvar-local matisse--pending-images nil
   "List of pending images to be included with the next message.
