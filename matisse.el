@@ -2766,19 +2766,9 @@ JSON-OBJ is the parsed JSON system message object from Claude Code."
         ;; Reset token count after successful compaction
         (matisse--reset-token-count)
 
-        ;; Handle queued messages after auto-compact completes
+        ;; Clear auto-compact flag - existing queue will automatically process next
         (when matisse--auto-compact-in-progress
-          (setq matisse--auto-compact-in-progress nil)
-          (let ((pending-count (cl-count-if (lambda (msg)
-                                              (eq (plist-get msg :status) 'pending))
-                                           matisse--message-queue)))
-            (when (> pending-count 0)
-              (matisse--debug-log "Auto-compact completed, %d messages queued" pending-count)
-              (when matisse--shell-context
-                (funcall (plist-get matisse--shell-context :write-output)
-                         (format "\n✓ Compaction complete, processing %d queued %s...\n"
-                                pending-count
-                                (if (= pending-count 1) "message" "messages")))))))))
+          (setq matisse--auto-compact-in-progress nil))))
 
      (t
       (matisse--debug-log "Unknown system message subtype: %s, content: %s" subtype content)
@@ -3556,8 +3546,7 @@ for that."
   (matisse--send-message-internal "/compact"))
 
 (defun matisse--send-message-async (text)
-  "Asynchronously format and send TEXT message to Claude Code process.
-Checks for auto-compact conditions before sending."
+  "Asynchronously format and send TEXT message to Claude Code process."
   ;; Proactively estimate and track tokens
   (when matisse-show-token-usage
     (let ((estimated-tokens (matisse--estimate-tokens text)))
@@ -3569,46 +3558,8 @@ Checks for auto-compact conditions before sending."
       ;; Update mode line to reflect new token count
       (force-mode-line-update)))
 
-  ;; Check if we should auto-compact, queue, or send directly
-  (cond
-   ;; Threshold reached and auto-compact enabled - skip for slash commands
-   ((and matisse-auto-compact-enabled
-         (> matisse--tokens-since-compact matisse-auto-compact-threshold)
-         (not (string-prefix-p "/" text))
-         (not matisse--auto-compact-in-progress))
-    (matisse--debug-log "Auto-compact threshold reached (%d > %d), triggering compaction"
-                        matisse--tokens-since-compact
-                        matisse-auto-compact-threshold)
-    ;; Queue user message and trigger compact
-    (matisse--enqueue-message text)
-    (setq matisse--auto-compact-in-progress t)
-    (matisse--send-compact-command))
-
-   ;; Already processing a message from existing queue - queue this one
-   ((matisse--get-current-message)
-    (matisse--debug-log "Message already processing, queueing new message")
-    (matisse--enqueue-message text)
-    (let ((pending-count (cl-count-if (lambda (msg)
-                                        (eq (plist-get msg :status) 'pending))
-                                     matisse--message-queue)))
-      (when matisse--shell-context
-        (funcall (plist-get matisse--shell-context :write-output)
-                 (format "\n⏳ Message queued (%d in queue)...\n" pending-count)))))
-
-   ;; Auto-compact in progress - queue this message
-   (matisse--auto-compact-in-progress
-    (matisse--debug-log "Auto-compact in progress, queueing message")
-    (matisse--enqueue-message text)
-    (let ((pending-count (cl-count-if (lambda (msg)
-                                        (eq (plist-get msg :status) 'pending))
-                                     matisse--message-queue)))
-      (when matisse--shell-context
-        (funcall (plist-get matisse--shell-context :write-output)
-                 (format "\n⏳ Message queued (%d in queue, waiting for compaction)...\n" pending-count)))))
-
-   ;; Not busy - send directly without queueing (avoid loop with existing queue system)
-   (t
-    (matisse--send-message-internal text))))
+  ;; Just send directly - existing queue system handles queueing when busy
+  (matisse--send-message-internal text))
 
 ;;;; Selection Tracking
 (defun matisse--get-selection-info ()
