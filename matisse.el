@@ -2294,6 +2294,15 @@ JSON-OBJ is the result message containing usage data."
   ;; Update mode line to reflect the reset
   (force-mode-line-update))
 
+(defun matisse--estimate-tokens (text)
+  "Estimate token count for TEXT using fast approximation.
+Uses the same heuristic as Claude Code CLI (z7 function): string length divided by 4.
+This is a rough estimate but sufficient for threshold checks.
+Returns estimated token count as integer."
+  (if (or (null text) (string-empty-p text))
+      0
+    (round (/ (length text) 4.0))))
+
 (defun matisse--format-token-status ()
   "Format token usage for mode line display."
   (when (and matisse-show-token-usage (> matisse--tokens-since-compact 0))
