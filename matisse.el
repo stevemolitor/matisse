@@ -3563,8 +3563,10 @@ to read data and prevent pipe buffer from filling up."
         (when (< offset total-length)
           (accept-process-output process 0.01))))))
 
-(defun matisse--send-message-async (text)
-  "Asynchronously format and send TEXT message to Claude Code process."
+(defun matisse--send-message-internal (text)
+  "Internal function to format and send TEXT message to Claude Code process.
+Does not check for auto-compact conditions - use matisse--send-message-async
+for that."
   (condition-case err
       (progn
         ;; Ensure process is still alive
@@ -3574,17 +3576,6 @@ to read data and prevent pipe buffer from filling up."
         (let ((json-msg (matisse--format-user-message text)))
           (if json-msg
               (progn
-                ;; Proactively estimate and track tokens before sending
-                (when matisse-show-token-usage
-                  (let ((estimated-tokens (matisse--estimate-tokens text)))
-                    (setq matisse--tokens-since-compact
-                          (+ matisse--tokens-since-compact estimated-tokens))
-                    (matisse--debug-log "User message estimated at %d tokens (total: %d)"
-                                        estimated-tokens
-                                        matisse--tokens-since-compact)
-                    ;; Update mode line to reflect new token count
-                    (force-mode-line-update)))
-
                 (matisse--debug-log "Sending JSON: %s" json-msg)
                 (matisse--debug-log "Process alive before send: %s" (process-live-p matisse--process))
                 (let ((full-msg (concat json-msg "\n")))
@@ -3600,10 +3591,57 @@ to read data and prevent pipe buffer from filling up."
      ;; Stop the spinner and reset state
      (matisse--stop-spinner)
      (setq matisse--waiting-for-response nil
-           matisse--pending-message nil) ; Clear pending message on send error
+           matisse--pending-message nil)
      ;; Display error message in echo area
      (message "Matisse error: %s" (error-message-string err))
-     (matisse--debug-log "Error in matisse--send-message-async: %s" (error-message-string err)))))
+     (matisse--debug-log "Error in matisse--send-message-internal: %s" (error-message-string err)))))
+
+(defun matisse--send-compact-command ()
+  "Send /compact command to trigger auto-compaction."
+  (when matisse--shell-context
+    (funcall (plist-get matisse--shell-context :write-output)
+             "\n⚙️  Auto-compacting conversation (threshold reached)...\n"))
+  (matisse--send-message-internal "/compact"))
+
+(defun matisse--send-message-async (text)
+  "Asynchronously format and send TEXT message to Claude Code process.
+Checks for auto-compact conditions before sending."
+  ;; Proactively estimate and track tokens
+  (when matisse-show-token-usage
+    (let ((estimated-tokens (matisse--estimate-tokens text)))
+      (setq matisse--tokens-since-compact
+            (+ matisse--tokens-since-compact estimated-tokens))
+      (matisse--debug-log "User message estimated at %d tokens (total: %d)"
+                          estimated-tokens
+                          matisse--tokens-since-compact)
+      ;; Update mode line to reflect new token count
+      (force-mode-line-update)))
+
+  ;; Check if we should auto-compact or queue the message
+  (cond
+   ;; Already compacting - queue this message
+   (matisse--auto-compact-in-progress
+    (matisse--debug-log "Auto-compact in progress, queueing message")
+    (setq matisse--pending-user-message text)
+    (when matisse--shell-context
+      (funcall (plist-get matisse--shell-context :write-output)
+               "\n⏳ Message queued (waiting for compaction to complete)...\n")))
+
+   ;; Threshold reached and auto-compact enabled - skip for slash commands
+   ((and matisse-auto-compact-enabled
+         (> matisse--tokens-since-compact matisse-auto-compact-threshold)
+         (not (string-prefix-p "/" text)))
+    (matisse--debug-log "Auto-compact threshold reached (%d > %d), triggering compaction"
+                        matisse--tokens-since-compact
+                        matisse-auto-compact-threshold)
+    ;; Queue user message and trigger compact
+    (setq matisse--pending-user-message text)
+    (setq matisse--auto-compact-in-progress t)
+    (matisse--send-compact-command))
+
+   ;; Normal message sending
+   (t
+    (matisse--send-message-internal text))))
 
 ;;;; Selection Tracking
 (defun matisse--get-selection-info ()
