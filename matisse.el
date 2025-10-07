@@ -2821,7 +2821,25 @@ JSON-OBJ is the parsed JSON system message object from Claude Code."
             (when pre-tokens
               (message "Tokens before compaction: %d" pre-tokens))))
         ;; Reset token count after successful compaction
-        (matisse--reset-token-count)))
+        (matisse--reset-token-count)
+
+        ;; Handle queued message after auto-compact completes
+        (when matisse--auto-compact-in-progress
+          (setq matisse--auto-compact-in-progress nil)
+          (when matisse--pending-user-message
+            (let ((queued-message matisse--pending-user-message)
+                  (current-buf (current-buffer)))
+              (setq matisse--pending-user-message nil)
+              (matisse--debug-log "Auto-compact completed, sending queued message")
+              (when matisse--shell-context
+                (funcall (plist-get matisse--shell-context :write-output)
+                         "\n✓ Compaction complete, sending queued message...\n"))
+              ;; Send queued message after short delay to ensure clean state
+              (run-at-time 0.5 nil
+                           (lambda ()
+                             (when (buffer-live-p current-buf)
+                               (with-current-buffer current-buf
+                                 (matisse--send-message-internal queued-message))))))))))
 
      (t
       (matisse--debug-log "Unknown system message subtype: %s, content: %s" subtype content)
