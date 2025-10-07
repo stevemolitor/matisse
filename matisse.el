@@ -73,6 +73,24 @@ nil means use Claude's default."
                  (const :tag "None" nil))
   :group 'matisse)
 
+(defcustom matisse-setting-sources "user,project,local"
+  "Comma-separated list of setting sources to load.
+Valid values: user, project, local.
+Loads custom subagents, commands, and settings from these locations.
+This enables your user-level subagents in ~/.claude/agents/ to be available."
+  :type 'string
+  :group 'matisse)
+
+(defcustom matisse-aggressive-subagent-prompt
+  "IMPORTANT: Use subagents (Task tool) proactively for file research and multi-file operations to preserve main context. When researching code or reading multiple files, use the general-purpose subagent (subagent_type: \"general-purpose\") to keep large tool results out of the main conversation. Subagents have separate context windows."
+  "System prompt addition to encourage aggressive subagent usage.
+When non-nil, this prompt is appended to Claude's system prompt to encourage
+using subagents for file-intensive operations, keeping the main context clean.
+Set to nil to disable this behavior."
+  :type '(choice (string :tag "Custom prompt")
+                 (const :tag "Disabled" nil))
+  :group 'matisse)
+
 (defcustom matisse-streaming t
   "Whether to use streaming responses."
   :type 'boolean
@@ -2980,7 +2998,8 @@ PARAMS contains sessionId and update fields."
                   ;; Show completion message for slash commands
                   (when matisse--pending-slash-command
                     (matisse--debug-log "Processing slash command completion: %s" matisse--pending-slash-command)
-                    (let ((command matisse--pending-slash-command))
+                    (let ((command matisse--pending-slash-command)
+                          (skip-token-tracking nil))
                       (setq matisse--pending-slash-command nil)
                       (cond
                        ((equal command "/clear")
@@ -2995,12 +3014,14 @@ PARAMS contains sessionId and update fields."
                             (error (matisse--debug-log "Error writing clear completion: %s" (error-message-string err)))))
                         ;; Reset token count after successful clear
                         (matisse--debug-log "Resetting token count after clear")
-                        (matisse--reset-token-count))
+                        (matisse--reset-token-count)
+                        (setq skip-token-tracking t))
 
                        ((equal command "/compact")
                         ;; Reset token count after successful compact
                         (matisse--debug-log "Resetting token count after compact")
                         (matisse--reset-token-count)
+                        (setq skip-token-tracking t)
                         ;; Don't show message for compact - it has its own system message handling
                         nil)
 
@@ -3012,10 +3033,11 @@ PARAMS contains sessionId and update fields."
                               (let ((truncated-command (matisse--truncate-text command matisse-max-progress-message-length)))
                                 (funcall (plist-get matisse--shell-context :write-output)
                                          (format "%sCommand completed: %s" (matisse--get-icon :command) truncated-command)))
-                            (error (matisse--debug-log "Error writing command completion: %s" (error-message-string err)))))))))
+                            (error (matisse--debug-log "Error writing command completion: %s" (error-message-string err)))))))
 
-                  ;; Track token usage
-                  (matisse--track-tokens json-obj)
+                      ;; Track token usage (skip for /clear and /compact since we just reset the counter)
+                      (unless skip-token-tracking
+                        (matisse--track-tokens json-obj))))
                   ;; Show performance summary if enabled
                   (let ((perf-summary (matisse--format-performance-summary json-obj)))
                     (when (and perf-summary
@@ -3274,6 +3296,16 @@ Returns the created process object."
                                   (number-to-string matisse-max-tokens)))))
     (when matisse-allowed-tools
       (setq cmd (append cmd (list "--allowedTools" matisse-allowed-tools))))
+
+    ;; Add setting sources to load user/project/local subagents
+    (when matisse-setting-sources
+      (setq cmd (append cmd (list "--setting-sources" matisse-setting-sources))))
+
+    ;; Add aggressive subagent prompt if configured
+    (when (and matisse-aggressive-subagent-prompt
+               (not (string-empty-p matisse-aggressive-subagent-prompt)))
+      (setq cmd (append cmd (list "--append-system-prompt"
+                                  matisse-aggressive-subagent-prompt))))
 
     ;; Log the command
     (matisse--debug-log "Starting process%s, command: %s"
