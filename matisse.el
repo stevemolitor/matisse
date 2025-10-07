@@ -2995,49 +2995,50 @@ PARAMS contains sessionId and update fields."
                   (setq matisse--pending-message nil)
                   (matisse--debug-log "Got result, finishing output")
 
-                  ;; Show completion message for slash commands
-                  (when matisse--pending-slash-command
-                    (matisse--debug-log "Processing slash command completion: %s" matisse--pending-slash-command)
-                    (let ((command matisse--pending-slash-command)
-                          (skip-token-tracking nil))
-                      (setq matisse--pending-slash-command nil)
-                      (cond
-                       ((equal command "/clear")
-                        (matisse--debug-log "Handling /clear completion")
-                        (when (and matisse--shell-context
-                                   (plist-get matisse--shell-context :write-output))
-                          (condition-case err
-                              (progn
-                                (matisse--debug-log "Calling write-output for clear completion")
-                                (funcall (plist-get matisse--shell-context :write-output)
-                                         (concat (matisse--get-icon :command) "Conversation cleared")))
-                            (error (matisse--debug-log "Error writing clear completion: %s" (error-message-string err)))))
-                        ;; Reset token count after successful clear
-                        (matisse--debug-log "Resetting token count after clear")
-                        (matisse--reset-token-count)
-                        (setq skip-token-tracking t))
+                  ;; Track token usage, but skip for /clear and /compact
+                  (let ((skip-token-tracking nil))
+                    ;; Show completion message for slash commands
+                    (when matisse--pending-slash-command
+                      (matisse--debug-log "Processing slash command completion: %s" matisse--pending-slash-command)
+                      (let ((command matisse--pending-slash-command))
+                        (setq matisse--pending-slash-command nil)
+                        (cond
+                         ((equal command "/clear")
+                          (matisse--debug-log "Handling /clear completion")
+                          (when (and matisse--shell-context
+                                     (plist-get matisse--shell-context :write-output))
+                            (condition-case err
+                                (progn
+                                  (matisse--debug-log "Calling write-output for clear completion")
+                                  (funcall (plist-get matisse--shell-context :write-output)
+                                           (concat (matisse--get-icon :command) "Conversation cleared")))
+                              (error (matisse--debug-log "Error writing clear completion: %s" (error-message-string err)))))
+                          ;; Reset token count after successful clear
+                          (matisse--debug-log "Resetting token count after clear")
+                          (matisse--reset-token-count)
+                          (setq skip-token-tracking t))
 
-                       ((equal command "/compact")
-                        ;; Reset token count after successful compact
-                        (matisse--debug-log "Resetting token count after compact")
-                        (matisse--reset-token-count)
-                        (setq skip-token-tracking t)
-                        ;; Don't show message for compact - it has its own system message handling
-                        nil)
+                         ((equal command "/compact")
+                          ;; Reset token count after successful compact
+                          (matisse--debug-log "Resetting token count after compact")
+                          (matisse--reset-token-count)
+                          (setq skip-token-tracking t)
+                          ;; Don't show message for compact - it has its own system message handling
+                          nil)
 
-                       ;; For other slash commands, show generic completion
-                       ((string-match-p "^/" command)
-                        (when (and matisse--shell-context
-                                   (plist-get matisse--shell-context :write-output))
-                          (condition-case err
-                              (let ((truncated-command (matisse--truncate-text command matisse-max-progress-message-length)))
-                                (funcall (plist-get matisse--shell-context :write-output)
-                                         (format "%sCommand completed: %s" (matisse--get-icon :command) truncated-command)))
-                            (error (matisse--debug-log "Error writing command completion: %s" (error-message-string err)))))))
+                         ;; For other slash commands, show generic completion
+                         ((string-match-p "^/" command)
+                          (when (and matisse--shell-context
+                                     (plist-get matisse--shell-context :write-output))
+                            (condition-case err
+                                (let ((truncated-command (matisse--truncate-text command matisse-max-progress-message-length)))
+                                  (funcall (plist-get matisse--shell-context :write-output)
+                                           (format "%sCommand completed: %s" (matisse--get-icon :command) truncated-command)))
+                              (error (matisse--debug-log "Error writing command completion: %s" (error-message-string err)))))))))
 
-                      ;; Track token usage (skip for /clear and /compact since we just reset the counter)
-                      (unless skip-token-tracking
-                        (matisse--track-tokens json-obj))))
+                    ;; Track token usage (skip for /clear and /compact since we just reset the counter)
+                    (unless skip-token-tracking
+                      (matisse--track-tokens json-obj)))
                   ;; Show performance summary if enabled
                   (let ((perf-summary (matisse--format-performance-summary json-obj)))
                     (when (and perf-summary
