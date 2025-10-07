@@ -3552,6 +3552,17 @@ to read data and prevent pipe buffer from filling up."
         (let ((json-msg (matisse--format-user-message text)))
           (if json-msg
               (progn
+                ;; Proactively estimate and track tokens before sending
+                (when matisse-show-token-usage
+                  (let ((estimated-tokens (matisse--estimate-tokens text)))
+                    (setq matisse--tokens-since-compact
+                          (+ matisse--tokens-since-compact estimated-tokens))
+                    (matisse--debug-log "User message estimated at %d tokens (total: %d)"
+                                        estimated-tokens
+                                        matisse--tokens-since-compact)
+                    ;; Update mode line to reflect new token count
+                    (force-mode-line-update)))
+
                 (matisse--debug-log "Sending JSON: %s" json-msg)
                 (matisse--debug-log "Process alive before send: %s" (process-live-p matisse--process))
                 (let ((full-msg (concat json-msg "\n")))
