@@ -197,6 +197,11 @@ Options:
   :type 'string
   :group 'matisse-ascii-icons)
 
+(defcustom matisse-ascii-icon-auto-compact "-"
+  "ASCII representation for auto-compact messages."
+  :type 'string
+  :group 'matisse-ascii-icons)
+
 ;;;;; Emoji Icons
 (defgroup matisse-emoji-icons nil
   "Emoji icon settings for progress indicators."
@@ -269,6 +274,11 @@ Options:
 
 (defcustom matisse-emoji-icon-command "⚡"
   "Emoji icon for command completion messages."
+  :type 'string
+  :group 'matisse-emoji-icons)
+
+(defcustom matisse-emoji-icon-auto-compact "⚙️"
+  "Emoji icon for auto-compact messages."
   :type 'string
   :group 'matisse-emoji-icons)
 
@@ -369,6 +379,11 @@ Options:
 
 (defcustom matisse-nerd-icon-command ""
   "Nerd Font icon for command completion messages."
+  :type 'string
+  :group 'matisse-nerd-icons)
+
+(defcustom matisse-nerd-icon-auto-compact ""
+  "Nerd Font icon for auto-compact messages."
   :type 'string
   :group 'matisse-nerd-icons)
 
@@ -551,6 +566,12 @@ Uses maroon color suitable for timing information."
 (defcustom matisse-nerd-icon-command-face 'matisse-nerd-icon-yellow
   "Face for command completion nerd icon.
 Uses yellow color suitable for command feedback."
+  :type 'face
+  :group 'matisse-nerd-icon-faces)
+
+(defcustom matisse-nerd-icon-auto-compact-face 'font-lock-keyword-face
+  "Face for auto-compact nerd icon.
+Uses keyword face suitable for system operations."
   :type 'face
   :group 'matisse-nerd-icon-faces)
 
@@ -2172,7 +2193,10 @@ Returns list: (emoji-icon nerd-icon nerd-face ascii-text)."
            matisse-nerd-icon-deny-face matisse-ascii-icon-deny))
     (:prompt
      (list matisse-emoji-shell-prompt matisse-nerd-shell-prompt
-           nil matisse-ascii-shell-prompt))))
+           nil matisse-ascii-shell-prompt))
+    (:auto-compact
+     (list matisse-emoji-icon-auto-compact matisse-nerd-icon-auto-compact
+           matisse-nerd-icon-auto-compact-face matisse-ascii-icon-auto-compact))))
 
 (defun matisse--get-icon (icon-type &optional tool-name)
   "Get formatted icon for ICON-TYPE based on current icon mode.
@@ -2192,14 +2216,6 @@ Icon types: :tool, :success, :performance, :command, :permission,
        (let ((text (nth 3 icon-data)))
          (if (string-empty-p text) "" (concat text " "))))
       (_ ""))))
-
-
-
-
-
-
-
-
 
 (defun matisse--format-progress-indicator (tool-name input-data)
   "Format a progress indicator for TOOL-NAME with INPUT-DATA."
@@ -3567,7 +3583,8 @@ Checks for auto-compact before sending (matches SDK's pre-API-call check)."
         (setq matisse--auto-compact-in-progress t)
         (when matisse--shell-context
           (funcall (plist-get matisse--shell-context :write-output)
-                   "\n⚙️  Auto-compacting conversation (threshold reached)...\n"))
+                   (format "\n%sAuto-compacting conversation (threshold reached)...\n"
+                           (matisse--get-icon :auto-compact))))
         ;; Send /compact first
         (let ((json-msg (matisse--format-user-message "/compact")))
           (when json-msg
