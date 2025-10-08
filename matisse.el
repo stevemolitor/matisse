@@ -6035,26 +6035,29 @@ DATA is the raw image data."
 (defvar matisse-command-map
   (let ((map (make-sparse-keymap)))
     ;; Session Management
+    (define-key map "s" #'matisse)
+    (define-key map "S" #'matisse-start-in-directory)
+    (define-key map "w" #'matisse-select-session)
+    (define-key map "r" #'matisse-resume)
+    (define-key map "c" #'matisse-continue)
     (define-key map "q" #'matisse-quit)
-    (define-key map "C" #'matisse-clear)   ; uppercase to avoid accidental clear
-    (define-key map "k" #'matisse-compact) ; kompact
-    (define-key map "i" #'matisse-interrupt)
 
-    ;; Configuration
+    ;; Conversation Control
+    (define-key map "e" #'matisse-send)
+    (define-key map "i" #'matisse-interrupt)
+    (define-key map "C" #'matisse-clear)
+    (define-key map "k" #'matisse-compact)
+    (define-key map "y" #'yank-media)
+
+    ;; Settings & Display
     (define-key map "m" #'matisse-set-model)
     (define-key map "M" #'matisse-cycle-permission-mode)
-
-    ;; Display Toggles
+    (define-key map "t" #'matisse-toggle)
     (define-key map "P" #'matisse-toggle-performance-summary)
-
-    ;; Utility
     (define-key map "T" #'matisse-show-tokens)
 
-    ;; Media
-    (define-key map "i" #'yank-media)
-
     ;; Menu
-    (define-key map "?" #'matisse-menu) ; show transient menu
+    (define-key map "?" #'matisse-menu)
 
     map)
   "Keymap for Matisse commands.
