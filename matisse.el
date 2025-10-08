@@ -1107,6 +1107,10 @@ Cleared when user sends a new message.")
 (defvar-local matisse--last-scroll-time nil
   "Time of last scroll operation to throttle rapid scrolling.")
 
+(defvar-local matisse--last-overlay-position nil
+  "Buffer position where overlays were last applied.
+Used for incremental overlay updates to avoid rescanning entire buffer.")
+
 ;;;; Global State Variables
 (defvar matisse--config nil
   "Shell configuration for matisse.")
@@ -1118,6 +1122,12 @@ start-char, end-char, text, has-selection.")
 
 (defvar matisse--selection-timer nil
   "Timer for debouncing selection updates.")
+
+(defvar-local matisse--overlay-timer nil
+  "Idle timer for applying overlays during streaming.")
+
+(defvar-local matisse--overlay-update-scheduled nil
+  "Flag indicating an overlay update is already scheduled.")
 
 ;;; Core Utilities
 (defun matisse--route-to-shell (text)
@@ -1260,8 +1270,8 @@ Starts in the project root if in a project, otherwise in `default-directory'."
 
               ;; Replay conversation history in the buffer
               (let ((last-message-type (matisse--replay-conversation-from-file session-file)))
-                ;; Apply syntax highlighting
-                (matisse--overlays-put)
+                ;; Skip syntax highlighting on replay - will be applied incrementally as needed
+                ;; (matisse--overlays-put)
 
                 ;; Insert prompt based on the last message type
                 (cond
@@ -3148,9 +3158,9 @@ PARAMS contains sessionId and update fields."
                           (funcall (plist-get matisse--shell-context :write-output)
                                    perf-summary)
                         (error (matisse--debug-log "Error writing performance summary: %s" (error-message-string err))))))
-                  ;; Apply markdown overlays to the response
+                  ;; Apply markdown overlays to the response (incremental for performance)
                   (condition-case err
-                      (matisse--overlays-put)
+                      (matisse--overlays-put t)  ; incremental=t to avoid rescanning entire buffer
                     (error (matisse--debug-log "Error applying markdown overlays: %s" (error-message-string err))))
                   ;; Clear active tools and reset state
                   (setq matisse--active-tools nil)
@@ -3563,9 +3573,9 @@ to read data and prevent pipe buffer from filling up."
         (matisse--debug-log "Sending chunk %d-%d of %d bytes" offset end total-length)
         (process-send-string process chunk)
         (setq offset end)
-        ;; Allow subprocess to read before sending more
+        ;; Allow subprocess to read before sending more (non-blocking check)
         (when (< offset total-length)
-          (accept-process-output process 0.01))))))
+          (accept-process-output process 0 10))))))  ; 0 sec + 10 millisec = non-blocking
 
 (defun matisse--send-message-internal (text)
   "Internal function to format and send TEXT message to Claude Code process.
@@ -3924,8 +3934,8 @@ Starts in the project root if in a project, otherwise in `default-directory'."
 
       ;; Replay previous conversation and check what type of message was last
       (let ((last-message-type (matisse--replay-previous-conversation)))
-        ;; Apply syntax highlighting
-        (matisse--overlays-put)
+        ;; Skip syntax highlighting on replay - will be applied incrementally as needed
+        ;; (matisse--overlays-put)
 
         ;; Insert prompt based on the last message type
         (cond
@@ -4555,22 +4565,26 @@ Each range in RANGES should be a cons cell (start . end)."
   (while props
     (overlay-put overlay (pop props) (pop props))))
 
-(defun matisse--find-patterns (pattern)
-  "Find all matches of PATTERN in buffer and return list of (start . end) pairs."
-  (let ((matches '()))
+(defun matisse--find-patterns (pattern &optional start-pos)
+  "Find all matches of PATTERN in buffer, return (start . end) pairs.
+Optional START-POS limits search for incremental updates."
+  (let ((matches '())
+        (search-start (or start-pos (point-min))))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char search-start)
       (while (re-search-forward pattern nil t)
         (push (cons (match-beginning 0) (match-end 0)) matches)))
     (nreverse matches)))
 
 ;;;; Markdown Support
-(defun matisse--find-markdown-code-blocks ()
+(defun matisse--find-markdown-code-blocks (&optional start-pos)
   "Find all markdown code blocks in buffer.
-Returns list of alists with keys: start, end, language, body."
-  (let ((blocks '()))
+Returns list of alists with keys: start, end, language, body.
+Optional START-POS limits search for incremental updates."
+  (let ((blocks '())
+        (search-start (or start-pos (point-min))))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char search-start)
       ;; More flexible regex that handles various formats
       (while (re-search-forward "^[ \t]*```\\([a-zA-Z0-9_+-]*\\)" nil t)
         (let* ((start-marker (match-beginning 0))
@@ -4707,12 +4721,14 @@ END-START END-END: closing ``` markers"
                        (buffer-substring-no-properties (car language-pos) (cdr language-pos)))))
       (matisse--apply-syntax-highlighting body-start body-end language))))
 
-(defun matisse--find-markdown-headers (&optional avoid-ranges)
+(defun matisse--find-markdown-headers (&optional avoid-ranges start-pos)
   "Find markdown headers, avoiding AVOID-RANGES.
-Returns list of alists with start, end, level, title positions."
-  (let ((headers '()))
+Returns list of alists with start, end, level, title positions.
+Optional START-POS limits search for incremental updates."
+  (let ((headers '())
+        (search-start (or start-pos (point-min))))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char search-start)
       (while (re-search-forward
               (rx bol (group (one-or-more "#"))
                   (one-or-more space)
@@ -4732,11 +4748,13 @@ Returns list of alists with start, end, level, title positions."
                   headers)))))
     (nreverse headers)))
 
-(defun matisse--find-markdown-bolds (&optional avoid-ranges)
-  "Find markdown bold text, avoiding AVOID-RANGES."
-  (let ((bolds '()))
+(defun matisse--find-markdown-bolds (&optional avoid-ranges start-pos)
+  "Find markdown bold text, avoiding AVOID-RANGES.
+Optional START-POS limits search for incremental updates."
+  (let ((bolds '())
+        (search-start (or start-pos (point-min))))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char search-start)
       ;; Match **text** or __text__ patterns
       (while (re-search-forward
               "\\(\\*\\*\\([^*\n]+?\\)\\*\\*\\|__\\([^_\n]+?\\)__\\)"
@@ -4758,11 +4776,13 @@ Returns list of alists with start, end, level, title positions."
                   bolds)))))
     (nreverse bolds)))
 
-(defun matisse--find-markdown-italics (&optional avoid-ranges)
-  "Find markdown italic text, avoiding AVOID-RANGES."
-  (let ((italics '()))
+(defun matisse--find-markdown-italics (&optional avoid-ranges start-pos)
+  "Find markdown italic text, avoiding AVOID-RANGES.
+Optional START-POS limits search for incremental updates."
+  (let ((italics '())
+        (search-start (or start-pos (point-min))))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char search-start)
       (while (re-search-forward
               (rx (or (group (or bol (one-or-more (any "\n \t")))
                              (group "*")
@@ -4785,11 +4805,13 @@ Returns list of alists with start, end, level, title positions."
                   italics)))))
     (nreverse italics)))
 
-(defun matisse--find-markdown-strikethroughs (&optional avoid-ranges)
-  "Find markdown strikethrough text, avoiding AVOID-RANGES."
-  (let ((strikethroughs '()))
+(defun matisse--find-markdown-strikethroughs (&optional avoid-ranges start-pos)
+  "Find markdown strikethrough text, avoiding AVOID-RANGES.
+Optional START-POS limits search for incremental updates."
+  (let ((strikethroughs '())
+        (search-start (or start-pos (point-min))))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char search-start)
       (while (re-search-forward
               (rx "~~" (group (one-or-more (not (any "\n~")))) "~~")
               nil t)
@@ -4806,11 +4828,13 @@ Returns list of alists with start, end, level, title positions."
                   strikethroughs)))))
     (nreverse strikethroughs)))
 
-(defun matisse--find-markdown-inline-codes (&optional avoid-ranges)
-  "Find markdown inline code, avoiding AVOID-RANGES."
-  (let ((codes '()))
+(defun matisse--find-markdown-inline-codes (&optional avoid-ranges start-pos)
+  "Find markdown inline code, avoiding AVOID-RANGES.
+Optional START-POS limits search for incremental updates."
+  (let ((codes '())
+        (search-start (or start-pos (point-min))))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char search-start)
       (while (re-search-forward
               "`\\([^`\n]+\\)`"
               nil t)
@@ -4995,19 +5019,26 @@ TEXT-START to TEXT-END marks the actual text."
         (overlay-put ov 'evaporate t)
         (message "Applied test overlay")))))
 
-(defun matisse--overlays-put ()
-  "Apply all matisse overlays to the buffer."
-  (matisse--overlays-remove)
+(defun matisse--overlays-put (&optional incremental)
+  "Apply all matisse overlays to the buffer.
+With optional INCREMENTAL non-nil, only process content added since last update."
+  (let ((start-pos (when incremental
+                     matisse--last-overlay-position)))
+    ;; Only remove overlays in the region we're updating
+    (when start-pos
+      (remove-overlays start-pos (point-max) 'category 'matisse-overlays))
+    (unless start-pos
+      (matisse--overlays-remove))
 
-  ;; Message headers: [Message #123] ...
-  (dolist (match (matisse--find-patterns "^\\[Message #[0-9]+\\].*$"))
+    ;; Message headers: [Message #123] ...
+    (dolist (match (matisse--find-patterns "^\\[Message #[0-9]+\\].*$" start-pos))
     (matisse--overlay-put
      (make-overlay (car match) (cdr match))
      'face 'matisse-message-header-face
      'evaporate t))
 
-  ;; User messages: > ...
-  (dolist (match (matisse--find-patterns "^> .*$"))
+    ;; User messages: > ...
+    (dolist (match (matisse--find-patterns "^> .*$" start-pos))
     (matisse--overlay-put
      (make-overlay (car match) (cdr match))
      'face 'matisse-user-message-face
@@ -5015,16 +5046,16 @@ TEXT-START to TEXT-END marks the actual text."
 
   ;; No special overlay for active prompts - they just use default appearance
 
-  ;; Status indicators: [PROCESSING], [COMPLETED], [ERROR]
-  (dolist (match (matisse--find-patterns "\\[\\(PROCESSING\\|COMPLETED\\|ERROR\\)\\]"))
+    ;; Status indicators: [PROCESSING], [COMPLETED], [ERROR]
+    (dolist (match (matisse--find-patterns "\\[\\(PROCESSING\\|COMPLETED\\|ERROR\\)\\]" start-pos))
     (matisse--overlay-put
      (make-overlay (car match) (cdr match))
      'face 'matisse-status-face
      'evaporate t))
 
-  ;; Markdown code blocks with syntax highlighting
-  (condition-case err
-      (dolist (block (matisse--find-markdown-code-blocks))
+    ;; Markdown code blocks with syntax highlighting
+    (condition-case err
+        (dolist (block (matisse--find-markdown-code-blocks start-pos))
         (let ((start-pos (plist-get block 'start))
               (end-pos (plist-get block 'end))
               (language-pos (plist-get block 'language))
@@ -5042,16 +5073,16 @@ TEXT-START to TEXT-END marks the actual text."
     (error
      (message "Error processing markdown code blocks: %s" (error-message-string err))))
 
-  ;; Calculate avoid-ranges for text formatting (code block ranges)
-  (let ((avoid-ranges (delq nil
-                            (mapcar (lambda (block)
-                                      (let ((body-pos (plist-get block 'body)))
-                                        (when (and body-pos (car body-pos) (cdr body-pos))
-                                          (cons (car body-pos) (cdr body-pos)))))
-                                    (matisse--find-markdown-code-blocks)))))
+    ;; Calculate avoid-ranges for text formatting (code block ranges)
+    (let ((avoid-ranges (delq nil
+                              (mapcar (lambda (block)
+                                        (let ((body-pos (plist-get block 'body)))
+                                          (when (and body-pos (car body-pos) (cdr body-pos))
+                                            (cons (car body-pos) (cdr body-pos)))))
+                                      (matisse--find-markdown-code-blocks start-pos)))))
 
-    ;; Markdown headers
-    (dolist (header (matisse--find-markdown-headers avoid-ranges))
+      ;; Markdown headers
+      (dolist (header (matisse--find-markdown-headers avoid-ranges start-pos))
       (let ((start (plist-get header 'start))
             (end (plist-get header 'end))
             (level (plist-get header 'level))
@@ -5064,8 +5095,8 @@ TEXT-START to TEXT-END marks the actual text."
            (car level) (cdr level)
            (car title) (cdr title)))))
 
-    ;; Markdown bold text
-    (dolist (bold (matisse--find-markdown-bolds avoid-ranges))
+      ;; Markdown bold text
+      (dolist (bold (matisse--find-markdown-bolds avoid-ranges start-pos))
       (let ((start (plist-get bold 'start))
             (end (plist-get bold 'end))
             (text (plist-get bold 'text)))
@@ -5075,8 +5106,8 @@ TEXT-START to TEXT-END marks the actual text."
            start end
            (car text) (cdr text)))))
 
-    ;; Markdown italic text
-    (dolist (italic (matisse--find-markdown-italics avoid-ranges))
+      ;; Markdown italic text
+      (dolist (italic (matisse--find-markdown-italics avoid-ranges start-pos))
       (let ((start (plist-get italic 'start))
             (end (plist-get italic 'end))
             (text (plist-get italic 'text)))
@@ -5086,8 +5117,8 @@ TEXT-START to TEXT-END marks the actual text."
            start end
            (car text) (cdr text)))))
 
-    ;; Markdown strikethrough text
-    (dolist (strikethrough (matisse--find-markdown-strikethroughs avoid-ranges))
+      ;; Markdown strikethrough text
+      (dolist (strikethrough (matisse--find-markdown-strikethroughs avoid-ranges start-pos))
       (let ((start (plist-get strikethrough 'start))
             (end (plist-get strikethrough 'end))
             (text (plist-get strikethrough 'text)))
@@ -5097,16 +5128,16 @@ TEXT-START to TEXT-END marks the actual text."
            start end
            (car text) (cdr text)))))
 
-    ;; Markdown inline code
-    (dolist (code (matisse--find-markdown-inline-codes avoid-ranges))
+      ;; Markdown inline code
+      (dolist (code (matisse--find-markdown-inline-codes avoid-ranges start-pos))
       (let ((body-pos (plist-get code 'body)))
         (when (and body-pos (car body-pos) (cdr body-pos))
           (matisse--fontify-inline-code
            (car body-pos)
            (cdr body-pos)))))
 
-    ;; Process markdown links
-    (dolist (link (matisse--find-markdown-links avoid-ranges))
+      ;; Process markdown links
+      (dolist (link (matisse--find-markdown-links avoid-ranges start-pos))
       (let ((text-pos (alist-get 'text link))
             (url-pos (alist-get 'url link))
             (full-pos (alist-get 'full link)))
@@ -5119,8 +5150,8 @@ TEXT-START to TEXT-END marks the actual text."
            (car url-pos) (cdr url-pos)
            (car full-pos) (cdr full-pos)))))
 
-    ;; Process markdown lists
-    (dolist (list-item (matisse--find-markdown-lists avoid-ranges))
+      ;; Process markdown lists
+      (dolist (list-item (matisse--find-markdown-lists avoid-ranges start-pos))
       (let ((marker-pos (alist-get 'marker list-item))
             (space-pos (alist-get 'space list-item))
             (text-pos (alist-get 'text list-item)))
@@ -5131,14 +5162,19 @@ TEXT-START to TEXT-END marks the actual text."
           (matisse--fontify-list-item
            (car marker-pos) (cdr marker-pos)
            (car space-pos) (cdr space-pos)
-           (car text-pos) (cdr text-pos)))))))
+           (car text-pos) (cdr text-pos))))))
 
-(defun matisse--find-markdown-links (&optional avoid-ranges)
-  "Find all markdown links [text](url) in buffer, avoiding AVOID-RANGES."
+    ;; Update last processed position
+    (setq matisse--last-overlay-position (point-max))))
+
+(defun matisse--find-markdown-links (&optional avoid-ranges start-pos)
+  "Find all markdown links [text](url) in buffer, avoiding AVOID-RANGES.
+Optional START-POS limits search for incremental updates."
   (let ((links '())
-        (link-regex "\\[\\([^]]+\\)\\](\\([^)]+\\))"))
+        (link-regex "\\[\\([^]]+\\)\\](\\([^)]+\\))")
+        (search-start (or start-pos (point-min))))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char search-start)
       (while (re-search-forward link-regex nil t)
         (let ((full-start (match-beginning 0))
               (full-end (match-end 0))
@@ -5154,12 +5190,14 @@ TEXT-START to TEXT-END marks the actual text."
                   links)))))
     (nreverse links)))
 
-(defun matisse--find-markdown-lists (&optional avoid-ranges)
+(defun matisse--find-markdown-lists (&optional avoid-ranges start-pos)
   "Find markdown list items (bullet and numbered), avoiding AVOID-RANGES.
-Only matches lists in Claude's responses, not in user input."
-  (let ((lists '()))
+Only matches lists in Claude's responses, not in user input.
+Optional START-POS limits search for incremental updates."
+  (let ((lists '())
+        (search-start (or start-pos (point-min))))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char search-start)
       ;; Match:
       ;; - Bullet lists with -, *, or +
       ;; - Numbered lists like 1. 2. etc
@@ -5884,13 +5922,15 @@ CONTENT is the new content to set."
                       (eobp))
             (insert "\n"))
           ;; Explicitly remove any inactive face that might have been inherited
+          ;; Use next-single-property-change for O(1) scanning instead of O(n)
           (let ((pos content-start))
             (while (< pos (point))
-              (when (eq (get-text-property pos 'face) 'matisse-prompt-inactive-face)
-                (remove-text-properties pos (1+ pos) '(face nil)))
-              (when (eq (get-text-property pos 'font-lock-face) 'matisse-prompt-inactive-face)
-                (remove-text-properties pos (1+ pos) '(font-lock-face nil)))
-              (setq pos (1+ pos))))
+              (let ((next-change (or (next-single-property-change pos 'face nil (point))
+                                    (point))))
+                (when (or (eq (get-text-property pos 'face) 'matisse-prompt-inactive-face)
+                         (eq (get-text-property pos 'font-lock-face) 'matisse-prompt-inactive-face))
+                  (remove-text-properties pos next-change '(face nil font-lock-face nil)))
+                (setq pos next-change))))
           ;; Update end marker
           (set-marker response-end (point))))
 
@@ -5949,18 +5989,29 @@ Returns the response-end marker position if available, or point-max as fallback.
                   (insert "\n"))
 
                 ;; Explicitly remove any inactive face that might have been inherited
+                ;; Use next-single-property-change for O(1) scanning instead of O(n)
                 (let ((pos start-pos))
                   (while (< pos (point))
-                    (when (eq (get-text-property pos 'face) 'matisse-prompt-inactive-face)
-                      (remove-text-properties pos (1+ pos) '(face nil)))
-                    (when (eq (get-text-property pos 'font-lock-face) 'matisse-prompt-inactive-face)
-                      (remove-text-properties pos (1+ pos) '(font-lock-face nil)))
-                    (setq pos (1+ pos))))
+                    (let ((next-change (or (next-single-property-change pos 'face nil (point))
+                                          (point))))
+                      (when (or (eq (get-text-property pos 'face) 'matisse-prompt-inactive-face)
+                               (eq (get-text-property pos 'font-lock-face) 'matisse-prompt-inactive-face))
+                        (remove-text-properties pos next-change '(face nil font-lock-face nil)))
+                      (setq pos next-change))))
                 ;; Update the end marker
                 (set-marker response-end (point)))))))
 
-      ;; Refresh overlays to apply syntax highlighting to new content
-      (matisse--overlays-put)
+      ;; Defer overlay application during streaming for performance
+      ;; Schedule incremental overlay update on idle, but only if not already scheduled
+      (unless matisse--overlay-update-scheduled
+        (setq matisse--overlay-update-scheduled t)
+        (run-with-idle-timer 0.3 nil
+                             (lambda (buf)
+                               (when (buffer-live-p buf)
+                                 (with-current-buffer buf
+                                   (matisse--overlays-put t)  ; incremental=t
+                                   (setq matisse--overlay-update-scheduled nil))))
+                             (current-buffer)))
 
       ;; Auto-scroll if we were at the end, but keep prompt away from bottom edge
       (matisse--auto-scroll-if-at-end at-end (current-buffer)))))
@@ -5992,8 +6043,11 @@ Returns the response-end marker position if available, or point-max as fallback.
       (unless (bolp) (insert "\n"))
       (matisse--insert-prompt))
 
-    ;; Refresh overlays one final time when response is complete
-    (matisse--overlays-put)
+    ;; Cancel any pending incremental overlay update
+    (setq matisse--overlay-update-scheduled nil)
+
+    ;; Refresh overlays one final time when response is complete (incremental)
+    (matisse--overlays-put t)  ; incremental=t to avoid rescanning entire buffer
 
     ;; Auto-scroll when output is finished to show completion
     (matisse--auto-scroll-if-at-end (matisse--user-at-end-p) (current-buffer))
@@ -6258,7 +6312,9 @@ Provides a clean interface for Claude interactions with visual feedback."
               matisse--large-paste-counter 0
               matisse--temp-files nil
               matisse--permission-decision nil
-              matisse--current-permission-message nil)
+              matisse--current-permission-message nil
+              matisse--last-overlay-position nil  ; For incremental overlay updates
+              matisse--overlay-update-scheduled nil)  ; For debouncing overlay updates
 
   ;; Key bindings using customizable keys (standard Emacs conventions)
   (local-set-key (kbd matisse-key-return) #'matisse--handle-return)
