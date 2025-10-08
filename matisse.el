@@ -2318,7 +2318,7 @@ JSON-OBJ is the result message containing usage data."
       (setq matisse--tokens-since-compact (+ matisse--tokens-since-compact total-this-turn))
 
       ;; Check if we should suggest compaction (warn before auto-compact triggers)
-      (when (> matisse--tokens-since-compact (matisse--warning-threshold))
+      (when (>= matisse--tokens-since-compact (matisse--warning-threshold))
         (matisse--suggest-compaction))
 
       (matisse--debug-log "Tokens this turn: %d (total: %d, since compact: %d)"
@@ -2334,7 +2334,7 @@ JSON-OBJ is the result message containing usage data."
   (when matisse--shell-context
     (funcall (plist-get matisse--shell-context :write-output)
              (if matisse-auto-compact-enabled
-                 (format "\n⚠️  Context at %dk tokens (will auto-compact at %dk)...\n"
+                 (format "\n⚠️  Context at %dk tokens (will auto-compact in %dk)...\n"
                         (/ matisse--tokens-since-compact 1000)
                         (/ (matisse--auto-compact-threshold) 1000))
                (format "\n⚠️  Context at %dk tokens. Consider /compact or enable auto-compact.\n"
@@ -3556,12 +3556,12 @@ to read data and prevent pipe buffer from filling up."
 Checks for auto-compact before sending (matches SDK's pre-API-call check)."
   ;; Auto-compact check BEFORE sending (like SDK does before API call)
   (if (and matisse-auto-compact-enabled
-           (> matisse--tokens-since-compact (matisse--auto-compact-threshold))
+           (>= matisse--tokens-since-compact (matisse--auto-compact-threshold))
            (not (string-prefix-p "/" text))
            (not matisse--auto-compact-in-progress))
       ;; Trigger auto-compact instead of sending
       (progn
-        (matisse--debug-log "Auto-compact threshold reached (%d > %d), triggering before send"
+        (matisse--debug-log "Auto-compact threshold reached (%d >= %d), triggering before send"
                             matisse--tokens-since-compact
                             (matisse--auto-compact-threshold))
         (setq matisse--auto-compact-in-progress t)
