@@ -919,6 +919,15 @@ otherwise falls back to the abbreviated directory path."
 (defvar matisse--scroll-throttle-ms 50
   "Minimum milliseconds between scroll operations.")
 
+(defvar matisse--skip-syntax-highlighting nil
+  "When non-nil, skip syntax highlighting in code blocks.
+Used during conversation replay for performance.")
+
+(defvar matisse--mode-buffer-cache (make-hash-table :test 'equal)
+  "Cache of temp buffers with major modes already activated.
+Keys are mode names (strings), values are buffer objects.
+This avoids expensive TreeSitter recompilation on every code block.")
+
 ;;;; Dynamic Variables & Data Structures
 (defvar matisse--slash-commands
   '(("/clear" . "Clear the conversation buffer")
@@ -1270,8 +1279,8 @@ Starts in the project root if in a project, otherwise in `default-directory'."
 
               ;; Replay conversation history in the buffer
               (let ((last-message-type (matisse--replay-conversation-from-file session-file)))
-                ;; Skip syntax highlighting on replay - will be applied incrementally as needed
-                ;; (matisse--overlays-put)
+                ;; Apply syntax highlighting to all code blocks once after replay
+                (matisse--overlays-put)
 
                 ;; Insert prompt based on the last message type
                 (cond
@@ -1371,7 +1380,9 @@ Returns \='user if last message was from user, \='assistant if from
 assistant, nil if no messages."
   (let ((target-buffer (current-buffer))
         (message-count 0)
-        (last-message-type nil))
+        (last-message-type nil)
+        (matisse--skip-syntax-highlighting t)  ; Skip highlighting during replay for performance
+        (inhibit-redisplay t))  ; Prevent redrawing after each insert
     (with-temp-buffer
       (insert-file-contents file)
       (goto-char (point-min))
@@ -1402,9 +1413,11 @@ assistant, nil if no messages."
                                   (cond
                                    ((equal type "user")
                                     ;; Format user message with prompt char and inactive face
-                                    (let ((prompt-char (matisse--get-icon :prompt)))
-                                      (insert (propertize (concat prompt-char " " text)
-                                                          'face 'matisse-prompt-inactive-face))
+                                    ;; Use batch property application for better performance
+                                    (let ((prompt-char (matisse--get-icon :prompt))
+                                          (start (point)))
+                                      (insert (concat prompt-char " " text))
+                                      (put-text-property start (point) 'face 'matisse-prompt-inactive-face)
                                       (insert "\n")))
                                    ((equal type "assistant")
                                     ;; Format assistant message - just text
@@ -4504,15 +4517,9 @@ Common options include \"  - \", \"  • \", \"  ◦ \", \"  ▸ \", \"  → \".
        (t lang-lower)))))
 
 (defun matisse--mode-can-load-p (mode-symbol)
-  "Test if MODE-SYMBOL can be loaded without errors.
-Returns non-nil if the mode can be activated successfully."
-  (and (fboundp mode-symbol)
-       (condition-case nil
-           (with-temp-buffer
-             (let ((inhibit-message t))
-               (funcall mode-symbol)
-               t))
-         (error nil))))
+  "Test if MODE-SYMBOL exists (fast check).
+Returns non-nil if the mode function is defined."
+  (fboundp mode-symbol))
 
 (defun matisse--find-best-mode (language)
   "Find the best available mode for LANGUAGE, preferring tree-sitter modes.
@@ -4542,6 +4549,32 @@ Returns the mode symbol if found, nil otherwise."
         (when matisse-debug
           (message "DEBUG: Found mode: %s" (or result "none")))
         result))))
+
+(defun matisse--get-cached-mode-buffer (target-mode)
+  "Get or create a cached buffer with TARGET-MODE already activated.
+Returns a buffer object that can be used for syntax highlighting.
+The buffer is cached so TreeSitter compilation only happens once per session."
+  (or (gethash target-mode matisse--mode-buffer-cache)
+      (let ((buf (generate-new-buffer (format " *matisse-syntax-%s*" target-mode))))
+        (with-current-buffer buf
+          (let ((inhibit-message t))
+            (funcall (intern target-mode)))
+          (font-lock-mode 1))
+        (puthash target-mode buf matisse--mode-buffer-cache)
+        (when matisse-debug
+          (message "DEBUG: Created cached buffer for mode: %s" target-mode))
+        buf)))
+
+(defun matisse--clear-mode-cache ()
+  "Clear the mode buffer cache, killing all cached buffers.
+Useful for debugging or if modes need to be reinitialized."
+  (interactive)
+  (maphash (lambda (_mode buf)
+             (when (buffer-live-p buf)
+               (kill-buffer buf)))
+           matisse--mode-buffer-cache)
+  (clrhash matisse--mode-buffer-cache)
+  (message "Cleared matisse mode buffer cache"))
 
 
 ;;;; Overlay-based Highlighting
@@ -4623,59 +4656,54 @@ LANGUAGE: language string (e.g. \\='json\\=', \\='typescript\\=')"
 
       (when (and target-mode (> (length (string-trim code-string)) 0))
         (condition-case err
-            (let ((faces-to-apply nil))
-              ;; Collect face information in temp buffer
-              (with-temp-buffer
-                ;; Insert the code in a temp buffer
+            (let ((faces-to-apply nil)
+                  ;; Get cached buffer with mode already activated (TreeSitter compiled once)
+                  (cached-buffer (matisse--get-cached-mode-buffer target-mode)))
+              ;; Use the cached buffer for syntax highlighting
+              (with-current-buffer cached-buffer
+                ;; Clear the buffer and insert new code
+                (erase-buffer)
                 (insert code-string)
 
-                ;; Enable the appropriate major mode
-                (let ((mode-symbol (intern target-mode)))
-                  (when matisse-debug
-                    (message "DEBUG: Attempting to enable mode: %s" target-mode))
-                  (when (fboundp mode-symbol)
-                    (let ((inhibit-message t))
-                      (funcall mode-symbol))
-                    (when matisse-debug
-                      (message "DEBUG: Mode enabled, major-mode is now: %s" major-mode))
+                (when matisse-debug
+                  (message "DEBUG: Using cached buffer for mode: %s" target-mode))
 
-                    ;; Force font-lock to run
-                    (font-lock-mode 1)
-                    (font-lock-ensure)
+                ;; Force font-lock to run on the new content
+                (font-lock-ensure)
 
-                    ;; Debug: check if faces were applied
-                    (when matisse-debug
-                      (message "DEBUG: First char face: %s" (get-text-property (point-min) 'face))
-                      (message "DEBUG: Buffer substring: %s" (buffer-substring-no-properties (point-min) (min 20 (point-max)))))
+                ;; Debug: check if faces were applied
+                (when matisse-debug
+                  (message "DEBUG: First char face: %s" (get-text-property (point-min) 'face))
+                  (message "DEBUG: Buffer substring: %s" (buffer-substring-no-properties (point-min) (min 20 (point-max)))))
 
-                    ;; Extract face properties
-                    (let ((temp-start (point-min))
-                          (temp-end (point-max)))
-                      (save-excursion
-                        (goto-char temp-start)
-                        (while (< (point) temp-end)
-                          (let* ((next-change (or (next-single-property-change (point) 'face nil temp-end)
-                                                 temp-end))
-                                 (face (get-text-property (point) 'face))
-                                 (temp-pos (point))
-                                 ;; Calculate corresponding position in original buffer
-                                 (orig-start (+ body-start (- temp-pos temp-start)))
-                                 (orig-end (+ body-start (- next-change temp-start))))
+                ;; Extract face properties
+                (let ((temp-start (point-min))
+                      (temp-end (point-max)))
+                  (save-excursion
+                    (goto-char temp-start)
+                    (while (< (point) temp-end)
+                      (let* ((next-change (or (next-single-property-change (point) 'face nil temp-end)
+                                             temp-end))
+                             (face (get-text-property (point) 'face))
+                             (temp-pos (point))
+                             ;; Calculate corresponding position in original buffer
+                             (orig-start (+ body-start (- temp-pos temp-start)))
+                             (orig-end (+ body-start (- next-change temp-start))))
 
-                            ;; Debug output
-                            (when (and matisse-debug face)
-                              (message "DEBUG: Found face %s from %d to %d (orig %d-%d)"
-                                       face temp-pos next-change orig-start orig-end))
+                        ;; Debug output
+                        (when (and matisse-debug face)
+                          (message "DEBUG: Found face %s from %d to %d (orig %d-%d)"
+                                   face temp-pos next-change orig-start orig-end))
 
-                            ;; Collect face info if there's a face and we're within bounds
-                            (when (and face
-                                      (< orig-start body-end)
-                                      (> orig-end body-start))
-                              (let ((actual-start (max orig-start body-start))
-                                    (actual-end (min orig-end body-end)))
-                                (push (list actual-start actual-end face) faces-to-apply)))
+                        ;; Collect face info if there's a face and we're within bounds
+                        (when (and face
+                                  (< orig-start body-end)
+                                  (> orig-end body-start))
+                          (let ((actual-start (max orig-start body-start))
+                                (actual-end (min orig-end body-end)))
+                            (push (list actual-start actual-end face) faces-to-apply)))
 
-                            (goto-char next-change))))))))
+                        (goto-char next-change))))))
 
               ;; Apply overlays in the original buffer
               (when matisse-debug
@@ -4716,10 +4744,11 @@ END-START END-END: closing ``` markers"
      'evaporate t
      'invisible t)
 
-    ;; Apply syntax highlighting to code content
-    (let* ((language (when language-pos
-                       (buffer-substring-no-properties (car language-pos) (cdr language-pos)))))
-      (matisse--apply-syntax-highlighting body-start body-end language))))
+    ;; Apply syntax highlighting to code content (unless skipping for performance)
+    (unless matisse--skip-syntax-highlighting
+      (let* ((language (when language-pos
+                         (buffer-substring-no-properties (car language-pos) (cdr language-pos)))))
+        (matisse--apply-syntax-highlighting body-start body-end language)))))
 
 (defun matisse--find-markdown-headers (&optional avoid-ranges start-pos)
   "Find markdown headers, avoiding AVOID-RANGES.
@@ -5452,14 +5481,19 @@ end of buffer."
   (interactive)
   ;; Always go to end of buffer to ensure we capture all input
   (goto-char (point-max))
-  (let* ((raw-input (string-trim (matisse--get-current-input-text)))
+  ;; Get input region once (includes prompt search) - avoid duplicate searches
+  (let* ((input-region (matisse--get-input-region))
+         (raw-input (if input-region
+                        (string-trim (buffer-substring-no-properties
+                                     (car input-region) (cdr input-region)))
+                      ""))
          (input-length (length raw-input))
          ;; Check if this is a large paste
          (is-large-paste (> input-length matisse-large-paste-threshold))
-         ;; Capture exact boundaries - now (point) is guaranteed to be at point-max
-         (prompt-start (save-excursion
-                         (goto-char (point-max))
-                         (when (re-search-backward matisse--shell-prompt-regex nil t)
+         ;; Capture exact boundaries using region (no re-search needed)
+         (prompt-start (when input-region
+                         (save-excursion
+                           (goto-char (car input-region))
                            (line-beginning-position))))
          (input-end (point-max))
          (actual-input raw-input))
@@ -5481,39 +5515,41 @@ end of buffer."
             (insert placeholder)
             (setq input-end (point))))))
 
-    ;; Now move to end and add newline
-    (goto-char (point-max))
-    (insert "\n")
+    ;; Disable redisplay during buffer modifications to prevent lag
+    (let ((inhibit-redisplay t))
+      ;; Now move to end and add newline
+      (goto-char (point-max))
+      (insert "\n")
 
-    (cond
-     ;; Check if responding to permission prompt
-     ((and matisse--pending-permission-request
-           (not (string-empty-p actual-input)))
-      (matisse--handle-permission-response actual-input))
+      (cond
+       ;; Check if responding to permission prompt
+       ((and matisse--pending-permission-request
+             (not (string-empty-p actual-input)))
+        (matisse--handle-permission-response actual-input))
 
-     ;; Empty input - just add new prompt
-     ((string-empty-p actual-input)
-      ;; Apply inactive face to empty prompt line (only if we found the prompt)
-      (when prompt-start
-        (let ((inhibit-read-only t))
-          ;; Apply inactive face to entire line (this will override the prompt character face)
-          (put-text-property prompt-start input-end 'face 'matisse-prompt-inactive-face)))
-      (goto-char input-end)
-      (matisse--insert-prompt)
-      ;; Auto-scroll after inserting new prompt (user was at end when submitting)
-      (matisse--auto-scroll-if-at-end (matisse--user-at-end-p) (current-buffer)))
+       ;; Empty input - just add new prompt
+       ((string-empty-p actual-input)
+        ;; Apply inactive face to empty prompt line (only if we found the prompt)
+        (when prompt-start
+          (let ((inhibit-read-only t))
+            ;; Apply inactive face to entire line (this will override the prompt character face)
+            (put-text-property prompt-start input-end 'face 'matisse-prompt-inactive-face)))
+        (goto-char input-end)
+        (matisse--insert-prompt)
+        ;; Auto-scroll after inserting new prompt (user was at end when submitting)
+        (matisse--auto-scroll-if-at-end (matisse--user-at-end-p) (current-buffer)))
 
-     ;; Valid input - process message
-     (t
-      ;; Apply inactive face to the exact region of prompt + user input FIRST
-      ;; before any buffer modifications (only if we found the prompt)
-      (when prompt-start
-        (let ((inhibit-read-only t))
-          ;; Apply inactive face to entire line (this will override the prompt character face)
-          (put-text-property prompt-start input-end 'face 'matisse-prompt-inactive-face)))
+       ;; Valid input - process message
+       (t
+        ;; Apply inactive face to the exact region of prompt + user input FIRST
+        ;; before any buffer modifications (only if we found the prompt)
+        (when prompt-start
+          (let ((inhibit-read-only t))
+            ;; Apply inactive face to entire line (this will override the prompt character face)
+            (put-text-property prompt-start input-end 'face 'matisse-prompt-inactive-face)))
 
-      ;; Continue with normal processing using actual input (not display placeholder)
-      (matisse--process-user-input-internal actual-input)))))
+        ;; Continue with normal processing using actual input (not display placeholder)
+        (matisse--process-user-input-internal actual-input))))))
 
 (defun matisse--process-user-input-internal (input)
   "Process user INPUT and queue for sending - internal implementation."
@@ -5909,30 +5945,31 @@ CONTENT is the new content to set."
     (let ((response-end (plist-get section :response-end))
           (current-pos (point)))
 
-      ;; Insert content at the response section
-      (save-excursion
-        (goto-char response-end)
-        (let ((content-start (point))
-              (inhibit-read-only t)  ; Allow inserting in read-only regions
-              ;; Trim leading newlines to avoid blank lines after progress indicators
-              (trimmed-content (string-trim-left content "[\n]+")))
-          (insert trimmed-content)
-          ;; Ensure content ends with newline for prompt separation
-          (unless (or (string-suffix-p "\n" trimmed-content)
-                      (eobp))
-            (insert "\n"))
-          ;; Explicitly remove any inactive face that might have been inherited
-          ;; Use next-single-property-change for O(1) scanning instead of O(n)
-          (let ((pos content-start))
-            (while (< pos (point))
-              (let ((next-change (or (next-single-property-change pos 'face nil (point))
-                                    (point))))
-                (when (or (eq (get-text-property pos 'face) 'matisse-prompt-inactive-face)
-                         (eq (get-text-property pos 'font-lock-face) 'matisse-prompt-inactive-face))
-                  (remove-text-properties pos next-change '(face nil font-lock-face nil)))
-                (setq pos next-change))))
-          ;; Update end marker
-          (set-marker response-end (point))))
+      ;; Insert content at the response section (inhibit redisplay for performance)
+      (let ((inhibit-redisplay t))
+        (save-excursion
+          (goto-char response-end)
+          (let ((content-start (point))
+                (inhibit-read-only t)  ; Allow inserting in read-only regions
+                ;; Trim leading newlines to avoid blank lines after progress indicators
+                (trimmed-content (string-trim-left content "[\n]+")))
+            (insert trimmed-content)
+            ;; Ensure content ends with newline for prompt separation
+            (unless (or (string-suffix-p "\n" trimmed-content)
+                        (eobp))
+              (insert "\n"))
+            ;; Explicitly remove any inactive face that might have been inherited
+            ;; Use next-single-property-change for O(1) scanning instead of O(n)
+            (let ((pos content-start))
+              (while (< pos (point))
+                (let ((next-change (or (next-single-property-change pos 'face nil (point))
+                                      (point))))
+                  (when (or (eq (get-text-property pos 'face) 'matisse-prompt-inactive-face)
+                           (eq (get-text-property pos 'font-lock-face) 'matisse-prompt-inactive-face))
+                    (remove-text-properties pos next-change '(face nil font-lock-face nil)))
+                  (setq pos next-change))))
+            ;; Update end marker
+            (set-marker response-end (point)))))
 
       ;; Don't refresh overlays here - they should only be applied to specific patterns
       ;; and refreshing them after every response insertion can cause incorrect face application
@@ -5971,35 +6008,37 @@ Returns the response-end marker position if available, or point-max as fallback.
            (trimmed-text (string-trim-left text "[\n]+"))
            ;; Truncate if too long, even in verbose mode
            (display-text (matisse--truncate-text trimmed-text matisse-max-progress-message-length)))
-      (save-excursion
-        ;; Find the current response end marker
-        (when (and matisse--current-message-id
-                   matisse--response-sections)
-          (let ((section (gethash matisse--current-message-id matisse--response-sections)))
-            (when section
-              (let ((response-end (plist-get section :response-end))
-                    (start-pos nil))
+      ;; Inhibit redisplay during progress indicator insertion for performance
+      (let ((inhibit-redisplay t))
+        (save-excursion
+          ;; Find the current response end marker
+          (when (and matisse--current-message-id
+                     matisse--response-sections)
+            (let ((section (gethash matisse--current-message-id matisse--response-sections)))
+              (when section
+                (let ((response-end (plist-get section :response-end))
+                      (start-pos nil))
 
-                (goto-char response-end)
-                ;; Add newline before progress if needed
-                (unless (bolp) (insert "\n"))
-                (setq start-pos (point))
-                (insert display-text)
-                (unless (string-suffix-p "\n" trimmed-text)
-                  (insert "\n"))
+                  (goto-char response-end)
+                  ;; Add newline before progress if needed
+                  (unless (bolp) (insert "\n"))
+                  (setq start-pos (point))
+                  (insert display-text)
+                  (unless (string-suffix-p "\n" trimmed-text)
+                    (insert "\n"))
 
-                ;; Explicitly remove any inactive face that might have been inherited
-                ;; Use next-single-property-change for O(1) scanning instead of O(n)
-                (let ((pos start-pos))
-                  (while (< pos (point))
-                    (let ((next-change (or (next-single-property-change pos 'face nil (point))
-                                          (point))))
-                      (when (or (eq (get-text-property pos 'face) 'matisse-prompt-inactive-face)
-                               (eq (get-text-property pos 'font-lock-face) 'matisse-prompt-inactive-face))
-                        (remove-text-properties pos next-change '(face nil font-lock-face nil)))
-                      (setq pos next-change))))
-                ;; Update the end marker
-                (set-marker response-end (point)))))))
+                  ;; Explicitly remove any inactive face that might have been inherited
+                  ;; Use next-single-property-change for O(1) scanning instead of O(n)
+                  (let ((pos start-pos))
+                    (while (< pos (point))
+                      (let ((next-change (or (next-single-property-change pos 'face nil (point))
+                                            (point))))
+                        (when (or (eq (get-text-property pos 'face) 'matisse-prompt-inactive-face)
+                                 (eq (get-text-property pos 'font-lock-face) 'matisse-prompt-inactive-face))
+                          (remove-text-properties pos next-change '(face nil font-lock-face nil)))
+                        (setq pos next-change))))
+                  ;; Update the end marker
+                  (set-marker response-end (point))))))))
 
       ;; Defer overlay application during streaming for performance
       ;; Schedule incremental overlay update on idle, but only if not already scheduled
