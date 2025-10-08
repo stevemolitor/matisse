@@ -2366,9 +2366,9 @@ Matches SDK's warning threshold calculation."
 
 (defun matisse--estimate-tokens (text)
   "Estimate token count for TEXT using fast approximation.
-Uses the same heuristic as Claude Code CLI (z7 function): string length divided by 4.
-This is a rough estimate but sufficient for threshold checks.
-Returns estimated token count as integer."
+Uses the same heuristic as Claude Code CLI (z7 function):
+string length divided by 4.  This is a rough estimate but sufficient
+for threshold checks.  Returns estimated token count as integer."
   (if (or (null text) (string-empty-p text))
       0
     (round (/ (length text) 4.0))))
@@ -3620,18 +3620,8 @@ Checks for auto-compact before sending (matches SDK's pre-API-call check)."
 
 (defun matisse--send-message-async (text)
   "Asynchronously format and send TEXT message to Claude Code process."
-  ;; Proactively estimate and track tokens
-  (when matisse-show-token-usage
-    (let ((estimated-tokens (matisse--estimate-tokens text)))
-      (setq matisse--tokens-since-compact
-            (+ matisse--tokens-since-compact estimated-tokens))
-      (matisse--debug-log "User message estimated at %d tokens (total: %d)"
-                          estimated-tokens
-                          matisse--tokens-since-compact)
-      ;; Update mode line to reflect new token count
-      (force-mode-line-update)))
-
   ;; Just send directly - existing queue system handles queueing when busy
+  ;; Token tracking happens when we receive the API response (matisse--process-result-message)
   (matisse--send-message-internal text))
 
 ;;;; Selection Tracking
@@ -3707,14 +3697,22 @@ selection content rather than file references to avoid token bloat."
            (end-line (alist-get 'end-line matisse--last-selection))
            (has-selection (alist-get 'has-selection matisse--last-selection))
            (selected-text (alist-get 'text matisse--last-selection)))
-      (when (and file-path has-selection (not (string-empty-p selected-text)))
-        ;; Send file path + line info + actual text (no @ reference)
-        ;; This avoids Claude Code CLI reading the entire file
-        (if (= start-line end-line)
-            (format "File: %s (line %d)\n\n%s"
-                    file-path start-line selected-text)
-          (format "File: %s (lines %d-%d)\n\n%s"
-                  file-path start-line end-line selected-text))))))
+      (when file-path
+        (cond
+         ;; Has selected text - send file path + line info + text
+         ((and has-selection (not (string-empty-p selected-text)))
+          (if (= start-line end-line)
+              (format "File: %s (line %d)\n\n%s"
+                      file-path start-line selected-text)
+            (format "File: %s (lines %d-%d)\n\n%s"
+                    file-path start-line end-line selected-text)))
+         ;; Just cursor position - send file path + line reference
+         (t
+          (if (= start-line end-line)
+              (format "Current file: %s (cursor at line %d)"
+                      file-path start-line)
+            (format "Current file: %s (cursor at line %d)"
+                    file-path start-line))))))))
 
 (defun matisse--format-selection-status ()
   "Format selection status for mode-line display.
@@ -3804,6 +3802,11 @@ Starts in the project root if in a project, otherwise in `default-directory'."
   (interactive)
   (matisse--validate-setup)
 
+  ;; Capture current buffer selection before switching to matisse shell
+  (let ((selection-info (matisse--get-selection-info)))
+    (when selection-info
+      (setq matisse--last-selection selection-info)))
+
   ;; Get the working directory (project root or default-directory)
   (let* ((initial-dir (matisse--get-working-directory))
          (buffer-name (matisse--generate-buffer-name initial-dir))
@@ -3821,6 +3824,11 @@ Starts in the project root if in a project, otherwise in `default-directory'."
 Prompts for the directory to use, defaulting to `default-directory'."
   (interactive (list (read-directory-name "Start matisse in directory: " default-directory nil t)))
   (matisse--validate-setup)
+
+  ;; Capture current buffer selection before switching to matisse shell
+  (let ((selection-info (matisse--get-selection-info)))
+    (when selection-info
+      (setq matisse--last-selection selection-info)))
 
   ;; Use the selected directory
   (let* ((initial-dir (expand-file-name directory))
@@ -4439,7 +4447,9 @@ will move it to the front rather than creating a duplicate."
     ("sh" . ("sh-mode"))
     ("bash" . ("sh-mode"))
     ("ruby" . ("ruby-ts-mode" "ruby-mode"))
-    ("php" . ("php-mode")))
+    ("php" . ("php-mode"))
+    ("markdown" . ("markdown-mode"))
+    ("md" . ("markdown-mode")))
   "Language mode preferences with fallbacks for syntax highlighting.
 Each entry maps a language name to a list of preferred modes,
 with tree-sitter modes listed first when available."
@@ -4466,6 +4476,17 @@ Common options include \"  - \", \"  • \", \"  ◦ \", \"  ▸ \", \"  → \".
        ((string= lang-lower "python") "python")
        (t lang-lower)))))
 
+(defun matisse--mode-can-load-p (mode-symbol)
+  "Test if MODE-SYMBOL can be loaded without errors.
+Returns non-nil if the mode can be activated successfully."
+  (and (fboundp mode-symbol)
+       (condition-case nil
+           (with-temp-buffer
+             (let ((inhibit-message t))
+               (funcall mode-symbol)
+               t))
+         (error nil))))
+
 (defun matisse--find-best-mode (language)
   "Find the best available mode for LANGUAGE, preferring tree-sitter modes.
 Returns the mode symbol if found, nil otherwise."
@@ -4481,20 +4502,15 @@ Returns the mode symbol if found, nil otherwise."
               (when-let* ((preferences (alist-get lang-lower matisse-language-mode-preferences nil nil #'string=)))
                 (cl-find-if (lambda (mode-name-str)
                               (let ((mode-symbol (intern mode-name-str)))
-                                (and (fboundp mode-symbol)
-                                     ;; Remove the provided-mode-derived-p check as it may be too restrictive
-                                     (or (provided-mode-derived-p mode-symbol 'prog-mode)
-                                         (provided-mode-derived-p mode-symbol 'text-mode)
-                                         ;; Allow any mode that exists
-                                         (fboundp mode-symbol)))))
+                                (matisse--mode-can-load-p mode-symbol)))
                             preferences))
               ;; 2. Try tree-sitter variant: LANGUAGE-ts-mode
               (let ((ts-mode (intern (concat lang-lower "-ts-mode"))))
-                (when (fboundp ts-mode)
+                (when (matisse--mode-can-load-p ts-mode)
                   (symbol-name ts-mode)))
               ;; 3. Try standard variant: LANGUAGE-mode
               (let ((standard-mode (intern (concat lang-lower "-mode"))))
-                (when (fboundp standard-mode)
+                (when (matisse--mode-can-load-p standard-mode)
                   (symbol-name standard-mode))))))
         (when matisse-debug
           (message "DEBUG: Found mode: %s" (or result "none")))
@@ -6256,6 +6272,9 @@ Provides a clean interface for Claude interactions with visual feedback."
 
   ;; Enable matisse-mode for mode-line enhancements and progress indicators
   (matisse-mode 1)
+
+  ;; Update mode-line to reflect any existing selection context
+  (matisse--update-mode-line)
 
   ;; Override mode line if configured
   (when matisse-override-mode-line
