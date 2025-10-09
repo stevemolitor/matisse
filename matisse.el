@@ -1017,6 +1017,11 @@ If nil, uses matisse-permission-mode.")
 Set by `matisse-set-permission-mode' when mode is changed.
 Included as updatedPermissions in next control_response.")
 
+(defvar-local matisse--auto-allow-next-write-tool nil
+  "When non-nil, automatically allow the next write tool without prompting.
+Set when user approves ExitPlanMode with \\='yes\\=' to allow the first edit.
+Cleared after the first write tool is executed.")
+
 (defvar-local matisse--available-commands nil
   "Commands available from Claude Code, discovered at initialization.")
 
@@ -1515,8 +1520,11 @@ Returns t if tool should be auto-allowed, nil otherwise."
   (or
    ;; If in bypass mode, allow everything
    (string= (or matisse--current-permission-mode matisse-permission-mode) "bypassPermissions")
-   ;; Always allow read-only tools and ExitPlanMode
-   (member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool" "ExitPlanMode"))))
+   ;; Always allow read-only tools
+   (member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
+   ;; Auto-allow next write tool if flag is set (after plan approval with "yes")
+   (and matisse--auto-allow-next-write-tool
+        (not (member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool" "ExitPlanMode"))))))
 
 (defun matisse--log-permission-decision (buffer-name _tool-name decision)
   "Log permission DECISION for TOOL-NAME in BUFFER-NAME.
@@ -1553,8 +1561,8 @@ Returns \"allow\" or \"deny\" synchronously."
    ((string= (or matisse--current-permission-mode matisse-permission-mode) "bypassPermissions")
     "allow")
 
-   ;; Always allow read-only tools and ExitPlanMode
-   ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool" "ExitPlanMode"))
+   ;; Always allow read-only tools
+   ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
     "allow")
 
    ;; Use simple y-or-n-p for other tools
@@ -1638,8 +1646,8 @@ suggestions array."
    ((string= (or matisse--current-permission-mode matisse-permission-mode) "bypassPermissions")
     (cons "allow" nil))
 
-   ;; Always allow read-only tools and ExitPlanMode
-   ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool" "ExitPlanMode"))
+   ;; Always allow read-only tools
+   ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
     (cons "allow" nil))
 
    ;; For write tools, check if we have acceptEdits suggestion
@@ -1899,15 +1907,26 @@ Returns a formatted prompt string."
                            (propertize "n" 'face 'help-key-binding)
                            "o and press RETURN:"))))
 
-    ;; Handle Edit tool specially with diff display
-    (if (string= tool-name "Edit")
-        (let* ((file-path (alist-get 'file_path tool-input))
-               (old-string (alist-get 'old_string tool-input))
-               (new-string (alist-get 'new_string tool-input))
-               (diff-text (matisse--create-edit-diff file-path old-string new-string)))
-          (format "%sEdit %s?\n\n%s\n%s\n" icon file-path diff-text options))
+    ;; Handle ExitPlanMode specially with plan display
+    (cond
+     ((string= tool-name "ExitPlanMode")
+      (let ((plan-text (alist-get 'plan tool-input)))
+        (format "\n%s\n\nApprove this plan?\n\nType %sccept, %ses, or %so and press RETURN:\n"
+                plan-text
+                (propertize "a" 'face 'help-key-binding)
+                (propertize "y" 'face 'help-key-binding)
+                (propertize "n" 'face 'help-key-binding))))
 
-      ;; Other tools - use simple format
+     ;; Handle Edit tool specially with diff display
+     ((string= tool-name "Edit")
+      (let* ((file-path (alist-get 'file_path tool-input))
+             (old-string (alist-get 'old_string tool-input))
+             (new-string (alist-get 'new_string tool-input))
+             (diff-text (matisse--create-edit-diff file-path old-string new-string)))
+        (format "%sEdit %s?\n\n%s\n%s\n" icon file-path diff-text options)))
+
+     ;; Other tools - use simple format
+     (t
       (let ((action (cond
                      ((string= tool-name "Bash")
                       (let ((command (alist-get 'command tool-input)))
@@ -1917,7 +1936,7 @@ Returns a formatted prompt string."
                      ((string= tool-name "MultiEdit")
                       "Edit multiple files")
                      (t (format "Use %s tool" tool-name)))))
-        (format "%s%s?\n%s\n" icon action options)))))
+        (format "%s%s?\n%s\n" icon action options))))))
 
 (defun matisse--prompt-permission-in-buffer (process request-id tool-name tool-input suggestions)
   "Show permission prompt in buffer and wait for user response.
@@ -2044,9 +2063,83 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
 
           (matisse--debug-log "IN-BUFFER PERMISSION: Processing response for %s (id=%s)" tool-name request-id)
 
-          ;; Check if accept is valid for this request
-          ;; Map abbreviations to full words and validate response
-          (let* ((has-accept (and (vectorp suggestions)
+          ;; Special handling for ExitPlanMode
+          (if (equal tool-name "ExitPlanMode")
+              (let* ((normalized-response (pcase response-trimmed
+                                           ((or "y" "yes") "yes")
+                                           ((or "n" "no") "no")
+                                           ((or "a" "accept") "accept")
+                                           (_ response-trimmed))))
+                ;; Clear pending request
+                (setq matisse--pending-permission-request nil)
+
+                ;; Clear input line
+                (let ((inhibit-read-only t)
+                      (prompt-start (save-excursion
+                                     (goto-char (point-max))
+                                     (when (re-search-backward matisse--shell-prompt-regex nil t)
+                                       (line-beginning-position))))
+                      (input-end (point-max)))
+                  (when prompt-start
+                    (delete-region prompt-start input-end)))
+
+                (cond
+                 ;; User chose "accept" - switch to bypassPermissions mode
+                 ((string= normalized-response "accept")
+                  (setq matisse--current-permission-mode "bypassPermissions")
+                  (matisse--update-mode-line)
+                  ;; Show decision in buffer
+                  (matisse--show-permission-decision "allow" "ExitPlanMode")
+                  (matisse--send-control-response process request-id
+                                                  `((behavior . "allow")
+                                                    (updatedInput . ,tool-input)
+                                                    (updatedPermissions . [((type . "setMode") (mode . "bypassPermissions") (destination . "session"))])))
+                  (matisse--start-spinner)
+                  ;; Insert new prompt so user can queue next message
+                  (matisse--insert-prompt))
+
+                 ;; User chose "yes" - switch to default mode and auto-allow next write tool
+                 ((string= normalized-response "yes")
+                  (matisse--debug-log "EXITPLANMODE: User chose 'yes', switching to default mode")
+                  (setq matisse--current-permission-mode "default")
+                  (setq matisse--auto-allow-next-write-tool t)  ; Auto-allow the first edit
+                  (matisse--debug-log "EXITPLANMODE: Mode set to=%s, auto-allow-flag=%s"
+                                      matisse--current-permission-mode
+                                      matisse--auto-allow-next-write-tool)
+                  (matisse--update-mode-line)
+                  ;; Show decision in buffer
+                  (matisse--show-permission-decision "allow" "ExitPlanMode")
+                  (matisse--send-control-response process request-id
+                                                  `((behavior . "allow")
+                                                    (updatedInput . ,tool-input)
+                                                    (updatedPermissions . [((type . "setMode") (mode . "default") (destination . "session"))])))
+                  (matisse--start-spinner)
+                  ;; Insert new prompt so user can queue next message
+                  (matisse--insert-prompt))
+
+                 ;; User chose "no" - reject plan, stay in plan mode
+                 ((string= normalized-response "no")
+                  ;; Show decision in buffer
+                  (matisse--show-permission-decision "deny" "ExitPlanMode")
+                  (matisse--send-control-response process request-id
+                                                  `((behavior . "deny")
+                                                    (message . "User rejected the plan")
+                                                    (interrupt . t)))
+                  (setq matisse--waiting-for-response nil)
+                  (matisse--stop-spinner)
+                  ;; Insert new prompt so user can enter new message
+                  (matisse--insert-prompt))
+
+                 ;; Invalid response
+                 (t
+                  (message "Invalid response. Type 'accept', 'yes', or 'no'.")
+                  ;; Re-insert prompt for retry
+                  (matisse--insert-prompt))))
+
+            ;; Normal tool permission handling
+            ;; Check if accept is valid for this request
+            ;; Map abbreviations to full words and validate response
+            (let* ((has-accept (and (vectorp suggestions)
                                  (cl-some (lambda (s)
                                            (and (equal (alist-get 'type s) "setMode")
                                                 (equal (alist-get 'mode s) "acceptEdits")))
@@ -2119,7 +2212,7 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
               ;; Invalid response - show error and keep waiting
               (message (if has-accept
                           "Invalid response. Type 'yes', 'no', or 'accept'"
-                        "Invalid response. Type 'yes' or 'no'")))))))))
+                        "Invalid response. Type 'yes' or 'no'"))))))))))
 
 (defun matisse--show-permission-decision (decision _tool-name)
   "Show permission DECISION for TOOL-NAME in buffer.
@@ -2988,14 +3081,23 @@ REQUEST-DATA contains tool_name, input, and permission_suggestions."
 
     (matisse--debug-log "STDIO PERMISSION: Received can_use_tool request for %s (id=%s)"
                         tool-name request-id)
+    (matisse--debug-log "STDIO PERMISSION: Current mode=%s, auto-allow-flag=%s"
+                        (or matisse--current-permission-mode matisse-permission-mode)
+                        matisse--auto-allow-next-write-tool)
 
     ;; First check if tool should be auto-allowed (bypass mode or read-only tools)
     (if (matisse--should-auto-allow-tool tool-name)
-        ;; Auto-allowed - send response immediately without pending permission updates
-        ;; (pending updates only apply to user-prompted permission decisions)
-        (matisse--send-control-response process request-id
-                                        `((behavior . "allow")
-                                          (updatedInput . ,tool-input)))
+        (progn
+          (matisse--debug-log "STDIO PERMISSION: Auto-allowing %s" tool-name)
+          ;; Auto-allowed - send response immediately without pending permission updates
+          ;; (pending updates only apply to user-prompted permission decisions)
+          (matisse--send-control-response process request-id
+                                          `((behavior . "allow")
+                                            (updatedInput . ,tool-input)))
+          ;; Clear the auto-allow flag after use (if it was set for first edit after plan approval)
+          (when matisse--auto-allow-next-write-tool
+            (matisse--debug-log "STDIO PERMISSION: Clearing auto-allow flag after first edit")
+            (setq matisse--auto-allow-next-write-tool nil)))
 
       ;; Not auto-allowed - prompt user based on mode
       (if matisse-in-buffer-permission-prompts
@@ -3283,9 +3385,42 @@ PARAMS contains sessionId and update fields."
                   (matisse--finish-current-message)) ;; END COND CLAUSE 3
 
                  ((equal (alist-get 'type json-obj) "user")
-                  ;; Handle user messages that contain command output
+                  ;; Handle user messages that contain command output or tool results
                   (let* ((message (alist-get 'message json-obj))
                          (content (and message (alist-get 'content message))))
+
+                    ;; Check for tool_result in vector content
+                    (when (vectorp content)
+                      (let ((tool-result (matisse--extract-tool-result json-obj)))
+                        (when tool-result
+                          (let* ((tool-use-id (alist-get 'tool_use_id tool-result))
+                                 ;; Find the matching tool from active-tools
+                                 (tool-info (seq-find (lambda (tool)
+                                                       (equal (alist-get 'id tool) tool-use-id))
+                                                     matisse--active-tools)))
+                            (when tool-info
+                              (let ((tool-name (alist-get 'name tool-info))
+                                    (tool-input (alist-get 'input tool-info)))
+                                ;; For Edit tools, display the diff
+                                (when (and (equal tool-name "Edit")
+                                          matisse-show-file-changes
+                                          matisse--shell-context
+                                          (plist-get matisse--shell-context :write-output))
+                                  (let* ((file-path (alist-get 'file_path tool-input))
+                                         (old-string (alist-get 'old_string tool-input))
+                                         (new-string (alist-get 'new_string tool-input))
+                                         (diff-text (matisse--create-edit-diff file-path old-string new-string))
+                                         (formatted-diff (format "\n%s\n" diff-text)))
+                                    (condition-case err
+                                        (funcall (plist-get matisse--shell-context :write-output)
+                                                formatted-diff)
+                                      (error (matisse--debug-log "Error writing diff: %s" (error-message-string err))))))
+                                ;; Remove completed tool from active-tools
+                                (setq matisse--active-tools
+                                      (seq-remove (lambda (tool)
+                                                   (equal (alist-get 'id tool) tool-use-id))
+                                                 matisse--active-tools))))))))
+
                     (when (stringp content)
                       (cond
                        ;; Handle local command stdout/stderr
