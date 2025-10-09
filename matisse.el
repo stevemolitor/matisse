@@ -1838,10 +1838,12 @@ Returns a propertized string with diff highlighting."
                          ;; Lines starting with '-' or ' ' (context): show line number
                          ((looking-at "^[-  ]")
                           (insert (propertize (format "%4d │ " current-line) 'face 'shadow))
+                          (delete-char 1)  ;; Remove the diff marker (-, or space)
                           (setq current-line (1+ current-line)))
                          ;; Lines starting with '+': show blank space
                          ((looking-at "^\\+")
-                          (insert (propertize "     │ " 'face 'shadow)))
+                          (insert (propertize "     │ " 'face 'shadow))
+                          (delete-char 1))  ;; Remove the diff marker (+)
                          ;; Other lines: no line number
                          (t nil))
                         (forward-line 1))))
