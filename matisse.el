@@ -1035,6 +1035,9 @@ Included as updatedPermissions in next control_response.")
 (defvar-local matisse--tokens-since-compact 0
   "Tokens used since last compaction.")
 
+(defvar-local matisse--resumed-session nil
+  "Non-nil when session was resumed/continued from previous conversation.")
+
 (defvar-local matisse--message-queue nil
   "Queue of user messages waiting to be sent.
 Messages are queued when:
@@ -2373,13 +2376,13 @@ JSON-OBJ is the result message containing usage data."
   (when matisse--shell-context
     (funcall (plist-get matisse--shell-context :write-output)
              (if matisse-auto-compact-enabled
-                 (format "\n⚠️  Context at %dk tokens (will auto-compact in %dk)...\n"
+                 (format "\n⚠️  Context at %dk tokens (auto-compact at %dk threshold)...\n"
                         (/ matisse--tokens-since-compact 1000)
                         (/ (matisse--auto-compact-threshold) 1000))
                (format "\n⚠️  Context at %dk tokens. Consider /compact or enable auto-compact.\n"
                       (/ matisse--tokens-since-compact 1000)))))
   (message (if matisse-auto-compact-enabled
-               (format "Context at %dk tokens (auto-compact at %dk)"
+               (format "Context at %dk tokens (auto-compact at %dk threshold)"
                       (/ matisse--tokens-since-compact 1000)
                       (/ (matisse--auto-compact-threshold) 1000))
              "Context is getting long. Consider /compact or enable auto-compact")))
@@ -2389,6 +2392,84 @@ JSON-OBJ is the result message containing usage data."
   (setq matisse--tokens-since-compact 0)
   ;; Update mode line to reflect the reset
   (force-mode-line-update))
+
+(defun matisse--calculate-initial-tokens-from-log (session-id)
+  "Calculate initial token count from conversation log for SESSION-ID.
+Returns total tokens used, accounting for compactions.
+Returns nil if log file cannot be found or parsed."
+  (condition-case err
+      (let* ((claude-dir (expand-file-name "~/.claude/projects"))
+             (log-file nil)
+             (tokens-from-compactions 0)
+             (tokens-after-last-compact 0)
+             (last-compact-line 0))
+
+        ;; Find the log file by searching all project directories
+        (when (file-directory-p claude-dir)
+          (dolist (project-dir (directory-files claude-dir t "^[^.]"))
+            (when (file-directory-p project-dir)
+              (let ((candidate (expand-file-name (concat session-id ".jsonl") project-dir)))
+                (when (file-exists-p candidate)
+                  (setq log-file candidate))))))
+
+        (if (not log-file)
+            (progn
+              (matisse--debug-log "Log file not found for session %s" session-id)
+              nil)
+
+          ;; Parse the log file
+          (with-temp-buffer
+            (insert-file-contents log-file)
+            (goto-char (point-min))
+            (let ((line-number 0))
+              (while (not (eobp))
+                (setq line-number (1+ line-number))
+                (let ((line (buffer-substring-no-properties
+                            (line-beginning-position)
+                            (line-end-position))))
+                  (unless (string-empty-p line)
+                    (condition-case parse-err
+                        (let* ((json-obj (json-parse-string line :object-type 'alist))
+                               (type (alist-get 'type json-obj)))
+
+                          ;; Check for compact_boundary messages
+                          (when (and (equal type "system")
+                                    (equal (alist-get 'subtype json-obj) "compact_boundary"))
+                            (let* ((compact-metadata (alist-get 'compactMetadata json-obj))
+                                   (pre-tokens (when compact-metadata
+                                               (alist-get 'preTokens compact-metadata))))
+                              (when pre-tokens
+                                (setq tokens-from-compactions (+ tokens-from-compactions pre-tokens))
+                                (setq last-compact-line line-number)
+                                (setq tokens-after-last-compact 0)
+                                (matisse--debug-log "Found compaction at line %d: %d tokens"
+                                                   line-number pre-tokens))))
+
+                          ;; Check for result messages (only count those after last compact)
+                          (when (and (equal type "assistant")
+                                    (> line-number last-compact-line))
+                            (let* ((message (alist-get 'message json-obj))
+                                   (usage (when message (alist-get 'usage message)))
+                                   (input-tokens (when usage (alist-get 'input_tokens usage)))
+                                   (output-tokens (when usage (alist-get 'output_tokens usage))))
+                              (when (and input-tokens output-tokens)
+                                (setq tokens-after-last-compact
+                                     (+ tokens-after-last-compact input-tokens output-tokens))))))
+
+                      (error
+                       (matisse--debug-log "Error parsing line %d: %s" line-number
+                                         (error-message-string parse-err))))))
+                (forward-line 1))))
+
+          ;; Return total tokens
+          (let ((total-tokens (+ tokens-from-compactions tokens-after-last-compact)))
+            (matisse--debug-log "Calculated initial tokens for session %s: %d (compactions: %d, after last compact: %d)"
+                               session-id total-tokens tokens-from-compactions tokens-after-last-compact)
+            total-tokens)))
+
+    (error
+     (matisse--debug-log "Error calculating initial tokens: %s" (error-message-string err))
+     nil)))
 
 ;;;; Threshold Calculations (SDK-style)
 (defun matisse--auto-compact-threshold ()
@@ -2825,6 +2906,15 @@ JSON-OBJ is the parsed JSON system message object from Claude Code."
      ((equal subtype "init")
       (setq matisse--conversation-id (alist-get 'session_id json-obj))
       (matisse--debug-log "Set conversation ID: %s" matisse--conversation-id)
+
+      ;; Calculate initial tokens for resumed sessions
+      (when matisse--resumed-session
+        (let ((initial-tokens (matisse--calculate-initial-tokens-from-log matisse--conversation-id)))
+          (when initial-tokens
+            (setq matisse--total-tokens-used initial-tokens)
+            (setq matisse--tokens-since-compact initial-tokens)
+            (message "Resumed session with %d tokens used" initial-tokens))))
+
       ;; Extract slash commands from init message
       ;; slash_commands is a vector of strings without "/" prefix
       (let ((slash-commands (alist-get 'slash_commands json-obj)))
@@ -3386,6 +3476,10 @@ Returns the created process object."
       (delete-process matisse--process))
     ;; Clear the reference even if process is dead
     (setq matisse--process nil))
+
+  ;; Set resumed flag if continuing or resuming a session
+  (when (or resume-session-id continue-flag)
+    (setq matisse--resumed-session t))
 
   (let* ((api-key (matisse--get-api-key))
          (process-environment (cons (format "ANTHROPIC_API_KEY=%s" api-key)
