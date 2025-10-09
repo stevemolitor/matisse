@@ -6375,7 +6375,7 @@ Returns the response-end marker position if available, or point-max as fallback.
                   (unless (bolp) (insert "\n"))
                   (setq start-pos (point))
                   (insert display-text)
-                  (unless (string-suffix-p "\n" trimmed-text)
+                  (unless (string-suffix-p "\n" display-text)
                     (insert "\n"))
 
                   ;; Explicitly remove any inactive face that might have been inherited
