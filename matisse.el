@@ -4399,7 +4399,13 @@ Works globally - finds the appropriate matisse buffer if not already in one."
 
 (defun matisse--set-permission-mode (mode)
   "Set the permission MODE for this session.
-Switches the mode without restarting the process if one is running."
+Switches the mode without restarting the process if one is running.
+Note: bypassPermissions mode can only be set at session startup via
+`matisse-permission-mode' variable, not dynamically."
+  ;; Reject bypassPermissions for dynamic switching
+  (when (string= mode "bypassPermissions")
+    (user-error "bypassPermissions mode can only be set at session startup via matisse-permission-mode variable"))
+
   (setq matisse--current-permission-mode mode)
   ;; Mark that we have a pending permission update to send in next control response
   (setq matisse--pending-permission-update mode)
@@ -4418,32 +4424,35 @@ Switches the mode without restarting the process if one is running."
   (let ((message-text
          (cond
           ((string= mode "plan")
-           (propertize "■ PLAN MODE" 'face '(:inherit success :weight bold)))
+           (propertize "PLAN MODE" 'face '(:inherit success :weight bold)))
           ((string= mode "acceptEdits")
-           (propertize "■ ACCEPT EDITS MODE" 'face 'matisse-accept-mode-face))
+           (propertize "ACCEPT EDITS MODE" 'face 'matisse-accept-mode-face))
           ((string= mode "bypassPermissions")
-           (propertize "■ BYPASS MODE" 'face '(:inherit error :weight bold)))
+           (propertize "BYPASS MODE" 'face '(:inherit error :weight bold)))
           ((string= mode "default")
-           (propertize "■ DEFAULT MODE" 'face 'matisse-default-mode-face))
+           (propertize "DEFAULT MODE" 'face 'matisse-default-mode-face))
           (t
-           (propertize (format "■ %s MODE" (upcase mode)) 'face '(:weight bold))))))
+           (propertize (format "%s MODE" (upcase mode)) 'face '(:weight bold))))))
     (message "%s" message-text)))
 
 ;;;###autoload
 (defun matisse-cycle-permission-mode ()
   "Cycle through permission modes.
-Order: default -> plan -> acceptEdits -> bypass -> default.
+Order: plan -> default -> acceptEdits -> plan.
+Note: bypassPermissions mode can only be set at session startup
+via `matisse-permission-mode' variable.
 Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive)
   (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
       (with-current-buffer target-buffer
         (let* ((current (or matisse--current-permission-mode matisse-permission-mode))
                (next (cond
-                      ((string= current "default") "plan")
-                      ((string= current "plan") "acceptEdits")
-                      ((string= current "acceptEdits") "bypassPermissions")
-                      ((string= current "bypassPermissions") "default")
-                      (t "default"))))
+                      ((string= current "plan") "default")
+                      ((string= current "default") "acceptEdits")
+                      ((string= current "acceptEdits") "plan")
+                      ;; If somehow in bypassPermissions (set at startup), cycle to plan
+                      ((string= current "bypassPermissions") "plan")
+                      (t "plan"))))
           (matisse--set-permission-mode next)))
     (user-error "No matisse session found")))
 
@@ -5779,12 +5788,21 @@ end of buffer."
         (let ((prompt-start (point)))
           (matisse--debug-log "Inserting prompt text at %d" prompt-start)
           (insert matisse--shell-prompt)
-          ;; Apply face only to prompt character
-          (when (and prompt-start (> (point) prompt-start))
-            (put-text-property prompt-start (+ prompt-start (length (matisse--get-icon :prompt))) 'face 'matisse-prompt-character-face)
-            ;; Make entire prompt read-only
-            (put-text-property prompt-start (point) 'read-only t)
-            (put-text-property prompt-start (point) 'rear-nonsticky '(read-only face)))
+          (let ((prompt-end (point)))
+            ;; Apply face only to prompt character (exclude trailing space)
+            (when (and prompt-start (> prompt-end prompt-start))
+              ;; Calculate icon length by removing trailing whitespace
+              (let* ((prompt-text matisse--shell-prompt)
+                     (trimmed-text (string-trim-right prompt-text))
+                     (icon-length (length trimmed-text)))
+                ;; Only apply face if we have non-whitespace content
+                (when (> icon-length 0)
+                  (put-text-property prompt-start
+                                   (min prompt-end (+ prompt-start icon-length))
+                                   'face 'matisse-prompt-character-face)))
+              ;; Make entire prompt read-only
+              (put-text-property prompt-start prompt-end 'read-only t)
+              (put-text-property prompt-start prompt-end 'rear-nonsticky '(read-only face))))
           (matisse--debug-log "Prompt inserted, now at point %d" (point)))
 
         ;; Position cursor for input
