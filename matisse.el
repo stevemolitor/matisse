@@ -1735,8 +1735,10 @@ suggestions array."
                            (t
                             (format "Allow %s tool? " tool-name))))
              (response (condition-case nil
-                          (if has-accept-edits-suggestion
+                          (if (and has-accept-edits-suggestion
+                                   (member tool-name '("Edit" "Write" "MultiEdit")))
                               ;; Use read-char-choice for y/a/n prompt with proper formatting
+                              ;; Only show "always" option for edit-related tools
                               (let* ((prompt-formatted (concat prompt-base
                                                               "("
                                                               (propertize "y" 'face 'help-key-binding)
