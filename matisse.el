@@ -1690,23 +1690,9 @@ suggestions array."
                   (goto-char insert-pos)
                   (let* ((inhibit-read-only t)
                          (icon (matisse--get-icon :permission))
-                         (permission-text (cond
-                                           ((string= tool-name "Bash")
-                                            (let* ((command (alist-get 'command tool-input))
-                                                   (truncated-command (if (and (not matisse-verbose-mode)
-                                                                              (> (length command) 40))
-                                                                         (concat (substring command 0 40) "[…]")
-                                                                       command)))
-                                              (format "\n%sPermission Request: Claude wants to run command:\n  %s\n"
-                                                      icon truncated-command)))
-                                           ((member tool-name '("Write" "Edit" "MultiEdit"))
-                                            (let ((file-path (or (alist-get 'file_path tool-input)
-                                                                 (alist-get 'path tool-input))))
-                                              (format "\n%sPermission Request: Claude wants to %s:\n  %s\n"
-                                                      icon (downcase tool-name) file-path)))
-                                           (t
-                                            (format "\n%sPermission Request: Claude wants to use %s tool\n"
-                                                    icon tool-name)))))
+                         ;; Use common description builder (non-brief = full format)
+                         (description (matisse--build-permission-description tool-name tool-input))
+                         (permission-text (format "\n%sPermission Request: %s\n" icon description)))
                     (insert permission-text)
                     ;; Update the response-end marker if we have one
                     (when (and (boundp 'matisse--current-message-id)
@@ -1720,33 +1706,15 @@ suggestions array."
                               (set-marker response-end (point))))))))))))))
 
       ;; Now prompt in minibuffer with extended options if suggestions available
-      (let* ((prompt-base (cond
-                           ((string= tool-name "Bash")
-                            (let* ((command (alist-get 'command tool-input))
-                                   (truncated-command (if (and (not matisse-verbose-mode)
-                                                              (> (length command) 40))
-                                                         (concat (substring command 0 40) "[…]")
-                                                       command)))
-                              (format "Allow command: %s? " truncated-command)))
-                           ((member tool-name '("Write" "Edit" "MultiEdit"))
-                            (let ((file-path (or (alist-get 'file_path tool-input)
-                                                 (alist-get 'path tool-input))))
-                              (format "Allow %s on %s? " (downcase tool-name) file-path)))
-                           (t
-                            (format "Allow %s tool? " tool-name))))
+      (let* (;; Use common description builder (brief = short format)
+             (prompt-base (concat (matisse--build-permission-description tool-name tool-input t) " "))
              (response (condition-case nil
                           (if (and has-accept-edits-suggestion
                                    (member tool-name '("Edit" "Write" "MultiEdit")))
                               ;; Use read-char-choice for y/a/n prompt with proper formatting
                               ;; Only show "always" option for edit-related tools
-                              (let* ((prompt-formatted (concat prompt-base
-                                                              "("
-                                                              (propertize "y" 'face 'help-key-binding)
-                                                              "es, "
-                                                              (propertize "a" 'face 'help-key-binding)
-                                                              "lways, "
-                                                              (propertize "n" 'face 'help-key-binding)
-                                                              "o) "))
+                              (let* ((options-text (matisse--format-permission-options t t))  ; has-accept=t, for-minibuffer=t
+                                     (prompt-formatted (concat prompt-base options-text))
                                      (char (read-char-choice prompt-formatted '(?y ?Y ?a ?A ?n ?N))))
                                 (cond
                                  ((memq char '(?y ?Y)) 'yes)
@@ -1963,6 +1931,78 @@ Uses the cached json-mode buffer for performance."
      ;; If highlighting fails, just return plain JSON
      (json-encode tool-input))))
 
+(defun matisse--build-permission-description (tool-name tool-input &optional brief)
+  "Build permission description for TOOL-NAME with TOOL-INPUT.
+When BRIEF is non-nil, return short form suitable for minibuffer prompts.
+Returns a string describing what the tool wants to do."
+  (cond
+   ((string= tool-name "Bash")
+    (let* ((command (alist-get 'command tool-input))
+           (truncated-command (if (and (not matisse-verbose-mode)
+                                      (> (length command) 40))
+                                 (concat (substring command 0 40) "[…]")
+                               command)))
+      (if brief
+          (format "Allow command: %s?" truncated-command)
+        (format "Claude wants to run command:\n  %s" truncated-command))))
+
+   ((string= tool-name "Write")
+    (let ((file-path (alist-get 'file_path tool-input)))
+      (if brief
+          (format "Allow write on %s?" file-path)
+        (format "Claude wants to write:\n  %s" file-path))))
+
+   ((string= tool-name "Edit")
+    (let ((file-path (alist-get 'file_path tool-input)))
+      (if brief
+          (format "Allow edit on %s?" file-path)
+        (format "Claude wants to edit:\n  %s" file-path))))
+
+   ((string= tool-name "MultiEdit")
+    (if brief
+        "Allow multi-file edit?"
+      "Claude wants to edit multiple files"))
+
+   (t
+    (if brief
+        (format "Allow %s tool?" tool-name)
+      (format "Claude wants to use %s tool" tool-name)))))
+
+(defun matisse--format-permission-options (has-accept &optional for-minibuffer)
+  "Format permission response options string.
+HAS-ACCEPT determines if \\'accept\\' or \\'always\\' option is shown.
+FOR-MINIBUFFER adjusts formatting for minibuffer vs in-buffer display.
+Returns a formatted string describing valid responses."
+  (if for-minibuffer
+      ;; Minibuffer format: (y/a/n) or (y/n)
+      (if has-accept
+          (concat "("
+                  (propertize "y" 'face 'help-key-binding)
+                  "es, "
+                  (propertize "a" 'face 'help-key-binding)
+                  "lways, "
+                  (propertize "n" 'face 'help-key-binding)
+                  "o) ")
+        (concat "("
+                (propertize "y" 'face 'help-key-binding)
+                "es, "
+                (propertize "n" 'face 'help-key-binding)
+                "o) "))
+    ;; In-buffer format: Type yes/accept/no and press RETURN:
+    (if has-accept
+        (concat "Type "
+                (propertize "y" 'face 'help-key-binding)
+                "es, "
+                (propertize "n" 'face 'help-key-binding)
+                "o, or "
+                (propertize "a" 'face 'help-key-binding)
+                "ccept and press RETURN:")
+      (concat "Type "
+              (propertize "y" 'face 'help-key-binding)
+              "es or "
+              (propertize "n" 'face 'help-key-binding)
+              "o and press RETURN:"))))
+
 (defun matisse--format-permission-prompt (tool-name tool-input suggestions)
   "Format permission prompt message for in-buffer display.
 TOOL-NAME is the name of the tool requesting permission.
@@ -1976,30 +2016,17 @@ Returns a formatted prompt string."
                                    (and (equal (alist-get 'type s) "setMode")
                                         (equal (alist-get 'mode s) "acceptEdits")))
                                  suggestions)))
-         ;; Format options with instructions to press RETURN
-         (options (if has-accept
-                     (concat "Type "
-                             (propertize "y" 'face 'help-key-binding)
-                             "es, "
-                             (propertize "n" 'face 'help-key-binding)
-                             "o, or "
-                             (propertize "a" 'face 'help-key-binding)
-                             "ccept and press RETURN:")
-                   (concat "Type "
-                           (propertize "y" 'face 'help-key-binding)
-                           "es or "
-                           (propertize "n" 'face 'help-key-binding)
-                           "o and press RETURN:"))))
+         ;; Use common options formatter
+         (options (matisse--format-permission-options has-accept)))
 
     ;; Handle ExitPlanMode specially with plan display
     (cond
      ((string= tool-name "ExitPlanMode")
       (let ((plan-text (alist-get 'plan tool-input)))
-        (format "\n%s\n\nApprove this plan?\n\nType %sccept, %ses, or %so and press RETURN:\n"
+        ;; ExitPlanMode always has accept option
+        (format "\n%s\n\nApprove this plan?\n\n%s\n"
                 plan-text
-                (propertize "a" 'face 'help-key-binding)
-                (propertize "y" 'face 'help-key-binding)
-                (propertize "n" 'face 'help-key-binding))))
+                (matisse--format-permission-options t))))  ; t = has-accept
 
      ;; Handle Edit tool specially with diff display
      ((string= tool-name "Edit")
@@ -2239,7 +2266,8 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
 
                  ;; Invalid response
                  (t
-                  (message "Invalid response. Type 'accept', 'yes', or 'no'.")
+                  ;; ExitPlanMode always has accept option
+                  (message "Invalid response. Type 'yes', 'no', or 'accept'.")
                   ;; Re-insert prompt for retry
                   (matisse--insert-prompt))))
 
@@ -2325,9 +2353,8 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
               (matisse--debug-log "IN-BUFFER PERMISSION: Done handling response"))
 
               ;; Invalid response - show error and keep waiting
-              (message (if has-accept
-                          "Invalid response. Type 'yes', 'no', or 'accept'"
-                        "Invalid response. Type 'yes' or 'no'"))))))))))
+              (message "Invalid response. Type %s"
+                      (if has-accept "'yes', 'no', or 'accept'." "'yes' or 'no'."))))))))))
 
 (defun matisse--show-permission-decision (decision _tool-name)
   "Show permission DECISION for TOOL-NAME in buffer.
