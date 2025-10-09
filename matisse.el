@@ -1907,6 +1907,62 @@ Returns a propertized string with diff highlighting."
       (when (buffer-live-p diff-buffer)
         (kill-buffer diff-buffer)))))
 
+(defun matisse--format-tool-params-with-highlighting (tool-input)
+  "Format TOOL-INPUT parameters as syntax-highlighted JSON.
+Returns a propertized string with JSON syntax highlighting applied.
+Uses the cached json-mode buffer for performance."
+  (condition-case _err
+      (let* ((json-string (json-encode tool-input))
+             ;; Pretty-print the JSON
+             (pretty-json (with-temp-buffer
+                           (insert json-string)
+                           (json-pretty-print-buffer)
+                           (buffer-string)))
+             ;; Get cached json-mode buffer
+             (target-mode (matisse--find-best-mode "json"))
+             (faces-to-apply nil))
+
+        (when target-mode
+          (let ((cached-buffer (matisse--get-cached-mode-buffer target-mode)))
+            ;; Use the cached buffer for syntax highlighting
+            (with-current-buffer cached-buffer
+              ;; Clear the buffer and insert JSON
+              (erase-buffer)
+              (insert pretty-json)
+
+              ;; Force font-lock to run
+              (font-lock-ensure)
+
+              ;; Extract face properties
+              (let ((temp-start (point-min))
+                    (temp-end (point-max)))
+                (save-excursion
+                  (goto-char temp-start)
+                  (while (< (point) temp-end)
+                    (let* ((next-change (or (next-single-property-change (point) 'face nil temp-end)
+                                           temp-end))
+                           (face (get-text-property (point) 'face))
+                           (temp-pos (point))
+                           (text (buffer-substring-no-properties temp-pos next-change)))
+                      (when face
+                        (push (list text face) faces-to-apply))
+                      (unless face
+                        (push (list text nil) faces-to-apply))
+                      (goto-char next-change)))))))
+
+          ;; Build the propertized string
+          (with-temp-buffer
+            (dolist (item (reverse faces-to-apply))
+              (let ((text (car item))
+                    (face (cadr item)))
+                (if face
+                    (insert (propertize text 'face face))
+                  (insert text))))
+            (buffer-string))))
+    (error
+     ;; If highlighting fails, just return plain JSON
+     (json-encode tool-input))))
+
 (defun matisse--format-permission-prompt (tool-name tool-input suggestions)
   "Format permission prompt message for in-buffer display.
 TOOL-NAME is the name of the tool requesting permission.
@@ -1953,18 +2009,25 @@ Returns a formatted prompt string."
              (diff-text (matisse--create-edit-diff file-path old-string new-string)))
         (format "%sEdit %s?\n\n%s\n%s\n" icon file-path diff-text options)))
 
-     ;; Other tools - use simple format
+     ;; Other tools - show parameters with syntax highlighting
      (t
-      (let ((action (cond
-                     ((string= tool-name "Bash")
-                      (let ((command (alist-get 'command tool-input)))
-                        (format "Run command: %s" command)))
-                     ((string= tool-name "Write")
-                      (format "Write file: %s" (alist-get 'file_path tool-input)))
-                     ((string= tool-name "MultiEdit")
-                      "Edit multiple files")
-                     (t (format "Use %s tool" tool-name)))))
-        (format "%s%s?\n%s\n" icon action options))))))
+      (let* ((action-header (cond
+                             ((string= tool-name "Bash")
+                              "Run command")
+                             ((string= tool-name "Write")
+                              (format "Write file: %s" (alist-get 'file_path tool-input)))
+                             ((string= tool-name "MultiEdit")
+                              "Edit multiple files")
+                             (t (format "Use %s tool" tool-name))))
+             ;; Show parameters as syntax-highlighted JSON for detailed view
+             (params-display (if (and tool-input
+                                      ;; Only show detailed params for certain tools
+                                      (member tool-name '("Bash" "Write" "NotebookEdit" "WebFetch")))
+                                 (concat "\n\nParameters:\n"
+                                        (matisse--format-tool-params-with-highlighting tool-input)
+                                        "\n")
+                               "")))
+        (format "%s%s?%s\n%s\n" icon action-header params-display options))))))
 
 (defun matisse--prompt-permission-in-buffer (process request-id tool-name tool-input suggestions)
   "Show permission prompt in buffer and wait for user response.
@@ -2020,7 +2083,10 @@ SUGGESTIONS is the permission_suggestions array from Claude."
                     (set-marker response-end (point)))))))))))
 
   ;; Force immediate scroll to show permission prompt
-  (matisse--auto-scroll-if-at-end t (current-buffer) t))
+  (matisse--auto-scroll-if-at-end t (current-buffer) t)
+
+  ;; Force redisplay so syntax highlighting is visible immediately
+  (redisplay t))
 
 (defun matisse--process-permission-response (process request-id tool-name tool-input suggestions response)
   "Process permission RESPONSE for TOOL-NAME.
@@ -3172,7 +3238,11 @@ REQUEST-DATA contains tool_name, input, and permission_suggestions."
             (matisse--send-control-response process request-id
                                             `((behavior . "deny")
                                               (message . "User denied permission")
-                                              (interrupt . t)))))))))
+                                              (interrupt . t)))
+            ;; CRITICAL: Clear waiting state and stop spinner immediately on denial
+            ;; Don't wait for Claude's "result" message - it might never arrive
+            (setq matisse--waiting-for-response nil)
+            (matisse--stop-spinner)))))))
 
 (defun matisse--send-control-response (process request-id response-data)
   "Send control response to Claude Code.
