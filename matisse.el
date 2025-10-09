@@ -6391,7 +6391,7 @@ DATA is the raw image data."
 
     ;; Settings & Display
     (define-key map "m" #'matisse-set-model)
-    (define-key map "M" #'matisse-cycle-permission-mode)
+    (define-key map "p" #'matisse-cycle-permission-mode)
     (define-key map "t" #'matisse-toggle)
     (define-key map "P" #'matisse-toggle-performance-summary)
     (define-key map "T" #'matisse-show-tokens)
@@ -6423,7 +6423,7 @@ Use \\[describe-keymap] to see all available commands.")
       ("y" "Yank media" yank-media)]
      ["Settings & Display"
       ("m" "Set model" matisse-set-model)
-      ("M" "Cycle permission" matisse-cycle-permission-mode :transient t)
+      ("p" "Cycle permission" matisse-cycle-permission-mode :transient t)
       ("t" "Toggle matisse window" matisse-toggle)
       ("P" "Toggle performance" matisse-toggle-performance-summary)
       ("T" "Show tokens" matisse-show-tokens)]]))
