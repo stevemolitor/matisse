@@ -1,0 +1,9 @@
+- ✅ Controlled & uncontrolled modes
+- ✅ Basic validation
+- ✅ Multi-line support
+- ✅ Render props for customization
+- ✅ Built on React Aria
+- ❌ NO field mapping
+- ❌ NO Slate editor
+- ❌ NO curlies
+- ❌ NO tracking
