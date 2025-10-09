@@ -4046,11 +4046,11 @@ Returns a string like \\='in matisse.el:45\\=' or \\='in matisse.el:45-47\\='."
   (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
     (cond
      ((string= mode "plan")
-      (propertize "[PLAN]" 'face '(:inherit success :weight bold)))
+      (propertize "[PLAN]" 'face '(:inherit success)))
      ((string= mode "acceptEdits")
       (propertize "[ACCEPT EDITS]" 'face 'matisse-accept-mode-face))
      ((string= mode "bypassPermissions")
-      (propertize "[BYPASS]" 'face '(:inherit error :weight bold)))
+      (propertize "[BYPASS]" 'face '(:inherit error)))
      ((string= mode "default")
       nil)  ; Don't show anything for default mode
      (t
