@@ -2085,6 +2085,11 @@ SUGGESTIONS is the permission_suggestions array from Claude."
   ;; Force immediate scroll to show permission prompt
   (matisse--auto-scroll-if-at-end t (current-buffer) t)
 
+  ;; Apply syntax highlighting to any code blocks in the prompt (incremental to avoid full buffer scan)
+  (condition-case err
+      (matisse--overlays-put t)  ; incremental=t for performance
+    (error (matisse--debug-log "Error applying overlays to permission prompt: %s" (error-message-string err))))
+
   ;; Force redisplay so syntax highlighting is visible immediately
   (redisplay t))
 
