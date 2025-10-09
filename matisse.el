@@ -4622,8 +4622,6 @@ Returns the mode symbol if found, nil otherwise."
     (let* ((normalized (matisse--normalize-language language))
            (lang-lower (downcase (string-trim (or normalized language)))))
       ;; Debug message to see what language we're trying to find
-      (when matisse-debug
-        (message "DEBUG: Finding mode for language: '%s' (normalized: '%s')" language lang-lower))
       (let ((result
              (or
               ;; 1. Check custom preferences first
@@ -4640,8 +4638,6 @@ Returns the mode symbol if found, nil otherwise."
               (let ((standard-mode (intern (concat lang-lower "-mode"))))
                 (when (matisse--mode-can-load-p standard-mode)
                   (symbol-name standard-mode))))))
-        (when matisse-debug
-          (message "DEBUG: Found mode: %s" (or result "none")))
         result))))
 
 (defun matisse--get-cached-mode-buffer (target-mode)
@@ -4655,8 +4651,6 @@ The buffer is cached so TreeSitter compilation only happens once per session."
             (funcall (intern target-mode)))
           (font-lock-mode 1))
         (puthash target-mode buf matisse--mode-buffer-cache)
-        (when matisse-debug
-          (message "DEBUG: Created cached buffer for mode: %s" target-mode))
         buf)))
 
 (defun matisse--clear-mode-cache ()
@@ -4719,13 +4713,6 @@ Optional START-POS limits search for incremental updates."
                (lang-end (match-end 1))
                (line-end (line-end-position))
                (body-start (1+ line-end)))  ; Start after the newline
-          ;; Debug the language capture
-          (when matisse-debug
-            (message "DEBUG: Found code block opener at %d, language: '%s'"
-                     start-marker
-                     (if (and lang-start lang-end (> lang-end lang-start))
-                         (buffer-substring-no-properties lang-start lang-end)
-                       "none")))
           ;; Now find the closing ```
           (when (re-search-forward "^[ \t]*```[ \t]*$" nil t)
             (let ((body-end (line-beginning-position))
@@ -4759,16 +4746,8 @@ LANGUAGE: language string (e.g. \\='json\\=', \\='typescript\\=')"
                 (erase-buffer)
                 (insert code-string)
 
-                (when matisse-debug
-                  (message "DEBUG: Using cached buffer for mode: %s" target-mode))
-
                 ;; Force font-lock to run on the new content
                 (font-lock-ensure)
-
-                ;; Debug: check if faces were applied
-                (when matisse-debug
-                  (message "DEBUG: First char face: %s" (get-text-property (point-min) 'face))
-                  (message "DEBUG: Buffer substring: %s" (buffer-substring-no-properties (point-min) (min 20 (point-max)))))
 
                 ;; Extract face properties
                 (let ((temp-start (point-min))
@@ -4784,11 +4763,6 @@ LANGUAGE: language string (e.g. \\='json\\=', \\='typescript\\=')"
                              (orig-start (+ body-start (- temp-pos temp-start)))
                              (orig-end (+ body-start (- next-change temp-start))))
 
-                        ;; Debug output
-                        (when (and matisse-debug face)
-                          (message "DEBUG: Found face %s from %d to %d (orig %d-%d)"
-                                   face temp-pos next-change orig-start orig-end))
-
                         ;; Collect face info if there's a face and we're within bounds
                         (when (and face
                                   (< orig-start body-end)
@@ -4800,15 +4774,11 @@ LANGUAGE: language string (e.g. \\='json\\=', \\='typescript\\=')"
                         (goto-char next-change))))))
 
               ;; Apply overlays in the original buffer
-              (when matisse-debug
-                (message "DEBUG: Applying %d overlays" (length faces-to-apply)))
               (with-current-buffer original-buffer
                 (dolist (face-info faces-to-apply)
                   (let ((start (nth 0 face-info))
                         (end (nth 1 face-info))
                         (face (nth 2 face-info)))
-                    (when matisse-debug
-                      (message "DEBUG: Creating overlay from %d to %d with face %s" start end face))
                     (matisse--overlay-put
                      (make-overlay start end)
                      'evaporate t
