@@ -105,9 +105,11 @@ Set to nil to disable this behavior."
   "Permission mode for Claude Code.
 Options are:
 - \"default\": Normal permissions with confirmation prompts
+- \"acceptEdits\": Auto-accept file edits (Edit, Write, MultiEdit)
 - \"bypassPermissions\": Skip all permission checks (use with caution)
 - \"plan\": Plan mode for planning tasks"
   :type '(choice (const :tag "Default" "default")
+                 (const :tag "Accept Edits" "acceptEdits")
                  (const :tag "Bypass Permissions" "bypassPermissions")
                  (const :tag "Plan Mode" "plan"))
   :group 'matisse)
@@ -1517,14 +1519,18 @@ assistant, nil if no messages."
 (defun matisse--should-auto-allow-tool (tool-name)
   "Check if TOOL-NAME should be auto-allowed without prompting.
 Returns t if tool should be auto-allowed, nil otherwise."
-  (or
-   ;; If in bypass mode, allow everything
-   (string= (or matisse--current-permission-mode matisse-permission-mode) "bypassPermissions")
-   ;; Always allow read-only tools
-   (member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
-   ;; Auto-allow next write tool if flag is set (after plan approval with "yes")
-   (and matisse--auto-allow-next-write-tool
-        (not (member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool" "ExitPlanMode"))))))
+  (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
+    (or
+     ;; If in bypass mode, allow everything
+     (string= mode "bypassPermissions")
+     ;; Always allow read-only tools
+     (member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
+     ;; In acceptEdits mode, auto-allow file editing tools
+     (and (string= mode "acceptEdits")
+          (member tool-name '("Edit" "Write" "MultiEdit")))
+     ;; Auto-allow next write tool if flag is set (after plan approval with "yes")
+     (and matisse--auto-allow-next-write-tool
+          (not (member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool" "ExitPlanMode")))))))
 
 (defun matisse--log-permission-decision (buffer-name _tool-name decision)
   "Log permission DECISION for TOOL-NAME in BUFFER-NAME.
@@ -1556,14 +1562,20 @@ This adds a simple log entry to the matisse shell buffer."
 TOOL-ID is the tool request identifier (unused).
 BUFFER-NAME is the specific matisse shell buffer (used in prompt).
 Returns \"allow\" or \"deny\" synchronously."
-  (cond
-   ;; If in bypass mode, allow everything
-   ((string= (or matisse--current-permission-mode matisse-permission-mode) "bypassPermissions")
-    "allow")
+  (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
+    (cond
+     ;; If in bypass mode, allow everything
+     ((string= mode "bypassPermissions")
+      "allow")
 
-   ;; Always allow read-only tools
-   ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
-    "allow")
+     ;; Always allow read-only tools
+     ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
+      "allow")
+
+     ;; In acceptEdits mode, auto-allow file editing tools
+     ((and (string= mode "acceptEdits")
+           (member tool-name '("Edit" "Write" "MultiEdit")))
+      "allow")
 
    ;; Use simple y-or-n-p for other tools
    (t
@@ -1630,7 +1642,7 @@ Returns \"allow\" or \"deny\" synchronously."
       (when buffer-name
         (matisse--log-permission-decision buffer-name tool-name decision))
 
-      decision))))
+      decision)))))
 
 (defun matisse--decide-tool-permission-with-suggestions (tool-name tool-input suggestions buffer-name)
   "Decide permission with optional suggestions for \\='always allow\\='.
@@ -1641,14 +1653,20 @@ BUFFER-NAME is the matisse shell buffer.
 Returns a cons cell: (decision . updated-permissions) where decision
 is \"allow\" or \"deny\" and updated-permissions is nil or the
 suggestions array."
-  (cond
-   ;; If in bypass mode, allow everything
-   ((string= (or matisse--current-permission-mode matisse-permission-mode) "bypassPermissions")
-    (cons "allow" nil))
+  (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
+    (cond
+     ;; If in bypass mode, allow everything
+     ((string= mode "bypassPermissions")
+      (cons "allow" nil))
 
-   ;; Always allow read-only tools
-   ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
-    (cons "allow" nil))
+     ;; Always allow read-only tools
+     ((member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
+      (cons "allow" nil))
+
+     ;; In acceptEdits mode, auto-allow file editing tools
+     ((and (string= mode "acceptEdits")
+           (member tool-name '("Edit" "Write" "MultiEdit")))
+      (cons "allow" nil))
 
    ;; For write tools, check if we have acceptEdits suggestion
    (t
@@ -1739,12 +1757,20 @@ suggestions array."
              (decision (if (eq response 'no) "deny" "allow"))
              (updated-permissions (if (eq response 'always) suggestions nil)))
 
-        ;; If user chose "always", switch to bypassPermissions mode in the shell buffer
+        ;; If user chose "always", switch mode based on suggestions
         (when (eq response 'always)
           (when-let* ((shell-buffer (get-buffer buffer-name)))
             (with-current-buffer shell-buffer
-              (setq matisse--current-permission-mode "bypassPermissions")
-              (matisse--update-mode-line))))
+              ;; Check if suggestions include acceptEdits mode
+              (let ((suggested-mode (if (and (vectorp suggestions)
+                                             (cl-some (lambda (s)
+                                                       (and (equal (alist-get 'type s) "setMode")
+                                                            (equal (alist-get 'mode s) "acceptEdits")))
+                                                     suggestions))
+                                       "acceptEdits"
+                                     "bypassPermissions")))
+                (setq matisse--current-permission-mode suggested-mode)
+                (matisse--update-mode-line)))))
 
         ;; Clear minibuffer message
         (message nil)
@@ -1753,7 +1779,7 @@ suggestions array."
         (when buffer-name
           (matisse--log-permission-decision buffer-name tool-name decision))
 
-        (cons decision updated-permissions))))))
+        (cons decision updated-permissions)))))))
 
 ;;;; In-Buffer Permission Prompts
 (defun matisse--find-string-line-number (file-path search-string)
@@ -2008,12 +2034,20 @@ RESPONSE is the user's response string."
                     (_ nil))))
 
     (when decision
-      ;; If user chose "accept", switch to bypassPermissions mode in process buffer
+      ;; If user chose "accept", switch mode based on suggestions
       (when (string= response "accept")
         (when-let* ((proc-buffer (process-buffer process)))
           (with-current-buffer proc-buffer
-            (setq matisse--current-permission-mode "bypassPermissions")
-            (matisse--update-mode-line))))
+            ;; Check if suggestions include acceptEdits mode
+            (let ((suggested-mode (if (and (vectorp suggestions)
+                                           (cl-some (lambda (s)
+                                                     (and (equal (alist-get 'type s) "setMode")
+                                                          (equal (alist-get 'mode s) "acceptEdits")))
+                                                   suggestions))
+                                     "acceptEdits"
+                                   "bypassPermissions")))
+              (setq matisse--current-permission-mode suggested-mode)
+              (matisse--update-mode-line)))))
 
       ;; Show decision in buffer
       (matisse--show-permission-decision decision tool-name)
@@ -2084,16 +2118,16 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
                     (delete-region prompt-start input-end)))
 
                 (cond
-                 ;; User chose "accept" - switch to bypassPermissions mode
+                 ;; User chose "accept" - switch to acceptEdits mode
                  ((string= normalized-response "accept")
-                  (setq matisse--current-permission-mode "bypassPermissions")
+                  (setq matisse--current-permission-mode "acceptEdits")
                   (matisse--update-mode-line)
                   ;; Show decision in buffer
                   (matisse--show-permission-decision "allow" "ExitPlanMode")
                   (matisse--send-control-response process request-id
                                                   `((behavior . "allow")
                                                     (updatedInput . ,tool-input)
-                                                    (updatedPermissions . [((type . "setMode") (mode . "bypassPermissions") (destination . "session"))])))
+                                                    (updatedPermissions . [((type . "setMode") (mode . "acceptEdits") (destination . "session"))])))
                   (matisse--start-spinner)
                   ;; Insert new prompt so user can queue next message
                   (matisse--insert-prompt))
@@ -2174,10 +2208,18 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
                     (when prompt-start
                       (delete-region prompt-start input-end)))
 
-                  ;; If user chose "accept", switch to bypassPermissions mode
+                  ;; If user chose "accept", switch mode based on suggestions
                   (when (string= normalized-response "accept")
-                    (setq matisse--current-permission-mode "bypassPermissions")
-                    (matisse--update-mode-line))
+                    ;; Check if suggestions include acceptEdits mode
+                    (let ((suggested-mode (if (and (vectorp suggestions)
+                                                   (cl-some (lambda (s)
+                                                             (and (equal (alist-get 'type s) "setMode")
+                                                                  (equal (alist-get 'mode s) "acceptEdits")))
+                                                           suggestions))
+                                             "acceptEdits"
+                                           "bypassPermissions")))
+                      (setq matisse--current-permission-mode suggested-mode)
+                      (matisse--update-mode-line)))
 
                   ;; Show decision in buffer
                   (matisse--show-permission-decision decision tool-name)
@@ -4005,8 +4047,10 @@ Returns a string like \\='in matisse.el:45\\=' or \\='in matisse.el:45-47\\='."
     (cond
      ((string= mode "plan")
       (propertize "[PLAN]" 'face '(:inherit success :weight bold)))
+     ((string= mode "acceptEdits")
+      (propertize "[ACCEPT EDITS]" 'face 'matisse-accept-mode-face))
      ((string= mode "bypassPermissions")
-      (propertize "[ACCEPT]" 'face 'matisse-accept-mode-face))
+      (propertize "[BYPASS]" 'face '(:inherit error :weight bold)))
      ((string= mode "default")
       nil)  ; Don't show anything for default mode
      (t
@@ -4269,8 +4313,10 @@ Switches the mode without restarting the process if one is running."
          (cond
           ((string= mode "plan")
            (propertize "■ PLAN MODE" 'face '(:inherit success :weight bold)))
+          ((string= mode "acceptEdits")
+           (propertize "■ ACCEPT EDITS MODE" 'face 'matisse-accept-mode-face))
           ((string= mode "bypassPermissions")
-           (propertize "■ ACCEPT MODE" 'face 'matisse-accept-mode-face))
+           (propertize "■ BYPASS MODE" 'face '(:inherit error :weight bold)))
           ((string= mode "default")
            (propertize "■ DEFAULT MODE" 'face 'matisse-default-mode-face))
           (t
@@ -4279,7 +4325,8 @@ Switches the mode without restarting the process if one is running."
 
 ;;;###autoload
 (defun matisse-cycle-permission-mode ()
-  "Cycle through permission modes: default -> plan -> bypass -> default.
+  "Cycle through permission modes.
+Order: default -> plan -> acceptEdits -> bypass -> default.
 Works globally - finds the appropriate matisse buffer if not already in one."
   (interactive)
   (if-let* ((target-buffer (matisse--get-target-buffer-or-current)))
@@ -4287,7 +4334,8 @@ Works globally - finds the appropriate matisse buffer if not already in one."
         (let* ((current (or matisse--current-permission-mode matisse-permission-mode))
                (next (cond
                       ((string= current "default") "plan")
-                      ((string= current "plan") "bypassPermissions")
+                      ((string= current "plan") "acceptEdits")
+                      ((string= current "acceptEdits") "bypassPermissions")
                       ((string= current "bypassPermissions") "default")
                       (t "default"))))
           (matisse--set-permission-mode next)))
