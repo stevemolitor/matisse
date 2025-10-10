@@ -174,6 +174,14 @@ Options:
                  (const :tag "ASCII only" ascii))
   :group 'matisse-icons)
 
+(defcustom matisse-modeline-use-emoji t
+  "Use emoji icons in modeline even when using nerd-icons or ascii mode.
+When non-nil, modeline indicators will always use emoji icons regardless
+of `matisse-icons-mode'. This allows using ASCII or nerd-icons for progress
+indicators while keeping the animated emoji in the modeline."
+  :type 'boolean
+  :group 'matisse-icons)
+
 ;;;;; ASCII Icons
 (defgroup matisse-ascii-icons nil
   "ASCII icon settings for progress indicators."
@@ -201,6 +209,16 @@ Options:
 
 (defcustom matisse-ascii-icon-auto-compact "-"
   "ASCII representation for auto-compact messages."
+  :type 'string
+  :group 'matisse-ascii-icons)
+
+(defcustom matisse-ascii-icon-modeline-default "|"
+  "ASCII character for mode-line default/idle state."
+  :type 'string
+  :group 'matisse-ascii-icons)
+
+(defcustom matisse-ascii-icon-modeline-permission "!"
+  "ASCII character for mode-line permission request state."
   :type 'string
   :group 'matisse-ascii-icons)
 
@@ -304,6 +322,21 @@ Options:
   :type 'string
   :group 'matisse-emoji-icons)
 
+(defcustom matisse-emoji-icon-modeline-default "🤖"
+  "Emoji icon for mode-line default/idle state."
+  :type 'string
+  :group 'matisse-emoji-icons)
+
+(defcustom matisse-emoji-icon-modeline-permission "🔐"
+  "Emoji icon for mode-line permission request state."
+  :type 'string
+  :group 'matisse-emoji-icons)
+
+(defcustom matisse-emoji-icon-modeline-active "🔥"
+  "Emoji icon for mode-line active/waiting state animation."
+  :type 'string
+  :group 'matisse-emoji-icons)
+
 ;;;;; Nerd Icons
 (defgroup matisse-nerd-icons nil
   "Nerd Font icon settings for progress indicators."
@@ -401,6 +434,21 @@ Options:
 
 (defcustom matisse-nerd-icon-deny "✗"
   "Nerd Font icon for denied/rejected actions."
+  :type 'string
+  :group 'matisse-nerd-icons)
+
+(defcustom matisse-nerd-icon-modeline-default ""
+  "Nerd Font icon for mode-line default/idle state."
+  :type 'string
+  :group 'matisse-nerd-icons)
+
+(defcustom matisse-nerd-icon-modeline-permission " "
+  "Nerd Font icon for mode-line permission request state."
+  :type 'string
+  :group 'matisse-nerd-icons)
+
+(defcustom matisse-nerd-icon-modeline-active " "
+  "Nerd Font icon for mode-line active/waiting state animation."
   :type 'string
   :group 'matisse-nerd-icons)
 
@@ -592,6 +640,24 @@ Uses light green color to indicate success."
 (defcustom matisse-nerd-icon-deny-face 'matisse-nerd-icon-pink
   "Face for denied/rejected action nerd icon.
 Uses pink/red color to indicate rejection."
+  :type 'face
+  :group 'matisse-nerd-icon-faces)
+
+(defcustom matisse-nerd-icon-modeline-default-face 'matisse-nerd-icon-blue
+  "Face for mode-line default/idle state nerd icon.
+Uses blue color for the default state."
+  :type 'face
+  :group 'matisse-nerd-icon-faces)
+
+(defcustom matisse-nerd-icon-modeline-permission-face 'matisse-nerd-icon-yellow
+  "Face for mode-line permission request state nerd icon.
+Uses yellow color to indicate attention required."
+  :type 'face
+  :group 'matisse-nerd-icon-faces)
+
+(defcustom matisse-nerd-icon-modeline-active-face 'matisse-nerd-icon-orange
+  "Face for mode-line active/waiting state nerd icon.
+Uses orange color to indicate activity."
   :type 'face
   :group 'matisse-nerd-icon-faces)
 
@@ -1456,12 +1522,10 @@ assistant, nil if no messages."
         (when (eq major-mode 'matisse-shell-mode)
           (let* ((spinner-part (cond
                                 (matisse--pending-permission-request
-                                 matisse-emoji-icon-permission)
+                                 (matisse--get-icon :modeline-permission))
                                 (matisse--waiting-for-response
-                                 (if (< (mod matisse--spinner-index 2) 1)
-                                     "🔥"  ; Fire emoji when "on"
-                                   "🤖")) ; Robot when "off"
-                                (t "🤖")))
+                                 (matisse--get-icon :modeline-active))
+                                (t (matisse--get-icon :modeline-default))))
                  (buffer-part (propertize (buffer-name) 'face 'font-lock-constant-face))
                  (selection-part (matisse--format-selection-status))
                  (token-part (matisse--format-token-status))
@@ -2459,24 +2523,53 @@ Returns list: (emoji-icon nerd-icon nerd-face ascii-text)."
            nil matisse-ascii-shell-prompt))
     (:auto-compact
      (list matisse-emoji-icon-auto-compact matisse-nerd-icon-auto-compact
-           matisse-nerd-icon-auto-compact-face matisse-ascii-icon-auto-compact))))
+           matisse-nerd-icon-auto-compact-face matisse-ascii-icon-auto-compact))
+    (:modeline-default
+     (list matisse-emoji-icon-modeline-default matisse-nerd-icon-modeline-default
+           matisse-nerd-icon-modeline-default-face matisse-ascii-icon-modeline-default))
+    (:modeline-permission
+     (list matisse-emoji-icon-modeline-permission matisse-nerd-icon-modeline-permission
+           matisse-nerd-icon-modeline-permission-face matisse-ascii-icon-modeline-permission))
+    (:modeline-active
+     (list matisse-emoji-icon-modeline-active matisse-nerd-icon-modeline-active
+           matisse-nerd-icon-modeline-active-face nil))))
 
 (defun matisse--get-icon (icon-type &optional tool-name)
   "Get formatted icon for ICON-TYPE based on current icon mode.
 For :tool icons, TOOL-NAME specifies which tool.
 Icon types: :tool, :success, :performance, :command, :permission,
-:allow, :deny, :prompt."
-  (let ((icon-data (matisse--get-icon-data icon-type tool-name)))
-    (pcase matisse-icons-mode
+:allow, :deny, :prompt, :modeline-default, :modeline-permission,
+:modeline-active."
+  (let ((icon-data (matisse--get-icon-data icon-type tool-name))
+        (effective-mode (if (and matisse-modeline-use-emoji
+                                 (memq icon-type '(:modeline-default :modeline-permission :modeline-active)))
+                            'emoji
+                          matisse-icons-mode)))
+    (pcase effective-mode
       ('emoji
        (let ((icon (nth 0 icon-data)))
+         ;; For modeline-active in emoji mode, alternate between active and default icons
+         (when (eq icon-type :modeline-active)
+           (setq icon (if (< (mod matisse--spinner-index 2) 1)
+                          (nth 0 (matisse--get-icon-data :modeline-active))
+                        (nth 0 (matisse--get-icon-data :modeline-default)))))
          (concat (matisse--apply-icon-face-properties icon) " ")))
       ('nerd-icons
        (let ((icon (nth 1 icon-data))
              (face (nth 2 icon-data)))
+         ;; For modeline-active in nerd-icons mode, alternate between active and default icons
+         (when (eq icon-type :modeline-active)
+           (if (< (mod matisse--spinner-index 2) 1)
+               (setq icon (nth 1 (matisse--get-icon-data :modeline-active))
+                     face (nth 2 (matisse--get-icon-data :modeline-active)))
+             (setq icon (nth 1 (matisse--get-icon-data :modeline-default))
+                   face (nth 2 (matisse--get-icon-data :modeline-default)))))
          (concat (matisse--apply-icon-face-properties icon face) " ")))
       ('ascii
        (let ((text (nth 3 icon-data)))
+         ;; For modeline-active in ascii mode, use spinner chars for animation
+         (when (eq icon-type :modeline-active)
+           (setq text (nth matisse--spinner-index matisse--spinner-chars)))
          (if (string-empty-p text) "" (concat text " "))))
       (_ ""))))
 
