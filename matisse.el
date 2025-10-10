@@ -107,11 +107,13 @@ Options are:
 - \"default\": Normal permissions with confirmation prompts
 - \"acceptEdits\": Auto-accept file edits (Edit, Write, MultiEdit)
 - \"bypassPermissions\": Skip all permission checks (use with caution)
-- \"plan\": Plan mode for planning tasks"
+- \"plan\": Plan mode for planning tasks
+- \"yolo\": Client-side auto-allow all permissions (can be toggled dynamically)"
   :type '(choice (const :tag "Default" "default")
                  (const :tag "Accept Edits" "acceptEdits")
                  (const :tag "Bypass Permissions" "bypassPermissions")
-                 (const :tag "Plan Mode" "plan"))
+                 (const :tag "Plan Mode" "plan")
+                 (const :tag "YOLO Mode" "yolo"))
   :group 'matisse)
 
 (defcustom matisse-in-buffer-permission-prompts t
@@ -447,7 +449,7 @@ indicators while keeping the animated emoji in the modeline."
   :type 'string
   :group 'matisse-nerd-icons)
 
-(defcustom matisse-nerd-icon-modeline-active " "
+(defcustom matisse-nerd-icon-modeline-active ""
   "Nerd Font icon for mode-line active/waiting state animation."
   :type 'string
   :group 'matisse-nerd-icons)
@@ -1585,8 +1587,9 @@ assistant, nil if no messages."
 Returns t if tool should be auto-allowed, nil otherwise."
   (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
     (or
-     ;; If in bypass mode, allow everything
+     ;; If in bypass mode or yolo mode, allow everything
      (string= mode "bypassPermissions")
+     (string= mode "yolo")
      ;; Always allow read-only tools
      (member tool-name '("Read" "Grep" "Glob" "WebSearch" "WebFetch" "ListMcpResourcesTool" "ReadMcpResourceTool"))
      ;; In acceptEdits mode, auto-allow file editing tools
@@ -1628,8 +1631,11 @@ BUFFER-NAME is the specific matisse shell buffer (used in prompt).
 Returns \"allow\" or \"deny\" synchronously."
   (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
     (cond
-     ;; If in bypass mode, allow everything
+     ;; If in bypass mode or yolo mode, allow everything
      ((string= mode "bypassPermissions")
+      "allow")
+
+     ((string= mode "yolo")
       "allow")
 
      ;; Always allow read-only tools
@@ -1719,8 +1725,11 @@ is \"allow\" or \"deny\" and updated-permissions is nil or the
 suggestions array."
   (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
     (cond
-     ;; If in bypass mode, allow everything
+     ;; If in bypass mode or yolo mode, allow everything
      ((string= mode "bypassPermissions")
+      (cons "allow" nil))
+
+     ((string= mode "yolo")
       (cons "allow" nil))
 
      ;; Always allow read-only tools
@@ -4245,11 +4254,13 @@ Returns a string like \\='in matisse.el:45\\=' or \\='in matisse.el:45-47\\='."
   (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
     (cond
      ((string= mode "plan")
-      (propertize "[PLAN]" 'face '(:inherit success)))
+      (propertize "[PLAN]" 'face '(:inherit success :weight 'bold)))
      ((string= mode "acceptEdits")
-      (propertize "[ACCEPT EDITS]" 'face 'matisse-accept-mode-face))
+      (propertize "[ACCEPT EDITS]" 'face 'matisse-accept-mode-face :weight 'bold))
      ((string= mode "bypassPermissions")
-      (propertize "[BYPASS]" 'face '(:inherit error)))
+      (propertize "[BYPASS]" 'face '(:inherit error :weight :bold)))
+     ((string= mode "yolo")
+      (propertize "[YOLO]" 'face '(:inherit warning :weight bold)))
      ((string= mode "default")
       nil)  ; Don't show anything for default mode
      (t
@@ -4522,6 +4533,8 @@ Note: bypassPermissions mode can only be set at session startup via
            (propertize "ACCEPT EDITS MODE" 'face 'matisse-accept-mode-face))
           ((string= mode "bypassPermissions")
            (propertize "BYPASS MODE" 'face '(:inherit error :weight bold)))
+          ((string= mode "yolo")
+           (propertize "YOLO MODE" 'face '(:inherit warning :weight bold)))
           ((string= mode "default")
            (propertize "DEFAULT MODE" 'face 'matisse-default-mode-face))
           (t
@@ -4531,7 +4544,7 @@ Note: bypassPermissions mode can only be set at session startup via
 ;;;###autoload
 (defun matisse-cycle-permission-mode ()
   "Cycle through permission modes.
-Order: plan -> default -> acceptEdits -> plan.
+Order: plan -> default -> acceptEdits -> yolo -> plan.
 Note: bypassPermissions mode can only be set at session startup
 via `matisse-permission-mode' variable.
 Works globally - finds the appropriate matisse buffer if not already in one."
@@ -4542,7 +4555,8 @@ Works globally - finds the appropriate matisse buffer if not already in one."
                (next (cond
                       ((string= current "plan") "default")
                       ((string= current "default") "acceptEdits")
-                      ((string= current "acceptEdits") "plan")
+                      ((string= current "acceptEdits") "yolo")
+                      ((string= current "yolo") "plan")
                       ;; If somehow in bypassPermissions (set at startup), cycle to plan
                       ((string= current "bypassPermissions") "plan")
                       (t "plan"))))
