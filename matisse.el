@@ -3139,7 +3139,7 @@ Returns dynamically discovered commands merged with local commands."
          (<= (point) (cdr input-region)))))
 
 (defun matisse--slash-command-completion-at-point ()
-  "Provide completion for slash commands and their arguments."
+  "Provide completion for slash commands, their arguments, and @ file references."
   (when (and (matisse--in-input-region-p)
              (derived-mode-p 'matisse-shell-mode))
     (let ((input-region (matisse--get-input-region)))
@@ -3147,6 +3147,17 @@ Returns dynamically discovered commands merged with local commands."
         (let ((input-start (car input-region)))
           (save-excursion
             (cond
+             ;; Complete @ file references
+             ((looking-back "@[^ \t\n]*" input-start)
+              (let ((end (point))
+                    (start (save-excursion
+                             (re-search-backward "@" input-start t)
+                             (1+ (point))))) ; Skip the @ character
+                (list start end
+                      #'read-file-name-internal
+                      :exclusive nil
+                      :annotation-function (lambda (_) " — file reference"))))
+
              ;; Complete slash commands at beginning of line or after whitespace
              ((looking-back "/[a-zA-Z-]*" input-start)
               ;; Find the actual start of the slash command
@@ -4708,7 +4719,91 @@ Creates a new session if none exists."
         (goto-char (point-max))
         (insert message)
         ;; Submit the message using our custom handler
-        (matisse--handle-return)))))
+        (matisse--handle-return))
+      ;; Switch to the matisse buffer
+      (pop-to-buffer matisse-buffer)
+      ;; Position cursor at end
+      (goto-char (point-max)))))
+
+;;;; File Reference Commands
+(defun matisse--format-file-reference (&optional selection-info)
+  "Format current file or SELECTION-INFO as @file reference.
+Returns string like @/path/to/file:LINE or @/path/to/file:START-END.
+If SELECTION-INFO is nil, uses current buffer."
+  (let* ((info (or selection-info (matisse--get-selection-info))))
+    (when info
+      (let* ((file-path (alist-get 'file-path info))
+             (start-line (alist-get 'start-line info))
+             (end-line (alist-get 'end-line info))
+             (has-selection (alist-get 'has-selection info)))
+        (when file-path
+          (if (and has-selection (not (= start-line end-line)))
+              (format "@%s:%d-%d" file-path start-line end-line)
+            (format "@%s:%d" file-path start-line)))))))
+
+;;;###autoload
+(defun matisse-copy-file-reference ()
+  "Copy current file or selection as @file reference to kill ring.
+If a region is active, copies @/path/to/file:START-END format.
+Otherwise, copies @/path/to/file:LINE format with cursor line."
+  (interactive)
+  (if-let* ((reference (matisse--format-file-reference)))
+      (progn
+        (kill-new reference)
+        (message "Copied: %s" reference))
+    (user-error "No file associated with current buffer")))
+
+;;;###autoload
+(defun matisse-insert-file-reference ()
+  "Insert current file or selection as @file reference into matisse buffer.
+Uses `matisse--find-target-buffer' to find the appropriate matisse session.
+Creates a new session if none exists."
+  (interactive)
+  (if-let* ((reference (matisse--format-file-reference))
+            (matisse-buffer (or (matisse--find-target-buffer)
+                                ;; Create new session if none found
+                                (progn
+                                  (matisse)
+                                  (matisse--find-target-buffer)))))
+      (progn
+        (with-current-buffer matisse-buffer
+          ;; Track this buffer usage
+          (matisse--update-mru (current-buffer))
+          ;; Insert at prompt
+          (goto-char (point-max))
+          (insert reference))
+        ;; Switch to the matisse buffer
+        (pop-to-buffer matisse-buffer)
+        ;; Position cursor at end of inserted reference
+        (goto-char (point-max))
+        (message "Inserted: %s" reference))
+    (user-error "No file associated with current buffer")))
+
+;;;###autoload
+(defun matisse-insert-file-reference-with-prompt ()
+  "Prompt for a file and insert as @file reference into matisse buffer.
+Uses `read-file-name' to select the file interactively."
+  (interactive)
+  (let* ((file-path (read-file-name "File: " nil nil t))
+         (absolute-path (expand-file-name file-path))
+         (reference (format "@%s" absolute-path))
+         (matisse-buffer (or (matisse--find-target-buffer)
+                             ;; Create new session if none found
+                             (progn
+                               (matisse)
+                               (matisse--find-target-buffer)))))
+    (when matisse-buffer
+      (with-current-buffer matisse-buffer
+        ;; Track this buffer usage
+        (matisse--update-mru (current-buffer))
+        ;; Insert at prompt
+        (goto-char (point-max))
+        (insert reference))
+      ;; Switch to the matisse buffer
+      (pop-to-buffer matisse-buffer)
+      ;; Position cursor at end of inserted reference
+      (goto-char (point-max))
+      (message "Inserted: %s" reference))))
 
 ;;;###autoload
 (defun matisse-quit ()
@@ -6627,6 +6722,11 @@ DATA is the raw image data."
     (define-key map "P" #'matisse-toggle-performance-summary)
     (define-key map "T" #'matisse-show-tokens)
 
+    ;; File References
+    (define-key map "@" #'matisse-insert-file-reference)
+    (define-key map "f" #'matisse-copy-file-reference)
+    (define-key map "F" #'matisse-insert-file-reference-with-prompt)
+
     ;; Menu
     (define-key map "?" #'matisse-menu)
 
@@ -6657,7 +6757,11 @@ Use \\[describe-keymap] to see all available commands.")
       ("p" "Cycle permission" matisse-cycle-permission-mode :transient t)
       ("t" "Toggle matisse window" matisse-toggle)
       ("P" "Toggle performance" matisse-toggle-performance-summary)
-      ("T" "Show tokens" matisse-show-tokens)]]))
+      ("T" "Show tokens" matisse-show-tokens)]
+     ["File References"
+      ("@" "Insert file reference" matisse-insert-file-reference)
+      ("f" "Copy file reference" matisse-copy-file-reference)
+      ("F" "Insert file (with prompt)" matisse-insert-file-reference-with-prompt)]]))
 
 (defun matisse-menu ()
   "Show the Matisse transient menu.
