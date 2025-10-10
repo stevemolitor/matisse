@@ -1836,7 +1836,11 @@ if not found.  If the file does not exist, returns nil."
           (goto-char (point-min))
           (when (search-forward search-string nil t)
             ;; Found it - calculate line number at the start of the match
-            (line-number-at-pos (match-beginning 0))))
+            ;; Use save-restriction + widen for correctness (temp buffers
+            ;; are rarely narrowed, but be consistent)
+            (save-restriction
+              (widen)
+              (line-number-at-pos (match-beginning 0)))))
       (error nil))))
 
 (defun matisse--create-edit-diff (file-path old-string new-string)
@@ -4170,8 +4174,14 @@ Returns alist with selection data, nil if no file or matisse buffer."
            (selected-text (if has-selection
                               (buffer-substring-no-properties start-pos end-pos)
                             ""))
-           (start-line (line-number-at-pos start-pos))
-           (end-line (line-number-at-pos end-pos))
+           ;; Use save-restriction + widen to get line numbers relative to full file
+           ;; not narrowed region
+           (start-line (save-restriction
+                         (widen)
+                         (line-number-at-pos start-pos)))
+           (end-line (save-restriction
+                       (widen)
+                       (line-number-at-pos end-pos)))
            (start-char (save-excursion
                          (goto-char start-pos)
                          (current-column)))
@@ -6363,9 +6373,13 @@ output while ensuring prompt stays visible."
                     (let* ((prompt-line (save-excursion
                                           (goto-char (point-max))
                                           (if (re-search-backward matisse--shell-prompt-regex nil t)
-                                              (line-number-at-pos)
+                                              (save-restriction
+                                                (widen)
+                                                (line-number-at-pos))
                                             nil)))
-                           (current-line (line-number-at-pos (point-max)))
+                           (current-line (save-restriction
+                                           (widen)
+                                           (line-number-at-pos (point-max))))
                            (input-lines (if prompt-line
                                             (1+ (- current-line prompt-line))
                                           1))
