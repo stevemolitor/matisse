@@ -3867,8 +3867,12 @@ CHECK-COUNT tracks how many times we've checked."
           (when callback
             (funcall callback)))))))
 
-(defun matisse--create-process-with-options (&optional resume-session-id continue-flag)
-  "Create Claude Code process with optional RESUME-SESSION-ID or CONTINUE-FLAG.
+(defun matisse--create-process-with-options (&optional resume-session-id continue-flag options)
+  "Create Claude Code process with optional args.
+RESUME-SESSION-ID: Session ID to resume.
+CONTINUE-FLAG: Continue from last conversation.
+OPTIONS: Plist with :model, :permission-mode, :allowed-tools,
+:disallowed-tools, :add-dirs, :system-prompt, :setting-sources, :verbose.
 Returns the created process object."
   ;; Clean up any existing process, whether alive or dead
   (when matisse--process
@@ -3885,7 +3889,10 @@ Returns the created process object."
          (process-environment (cons (format "ANTHROPIC_API_KEY=%s" api-key)
                                     (cons (format "MATISSE_BUFFER_NAME=%s" (buffer-name))
                                           process-environment)))
-         (current-permission-mode (or matisse--current-permission-mode matisse-permission-mode))
+         ;; Use permission mode from options, shell context, or default
+         (current-permission-mode (or (plist-get options :permission-mode)
+                                     matisse--current-permission-mode
+                                     matisse-permission-mode))
          (cmd (list matisse-claude-code-path
                     "--permission-mode" current-permission-mode
                     "--permission-prompt-tool" "stdio"
@@ -3900,30 +3907,48 @@ Returns the created process object."
     (when resume-session-id
       (setq cmd (append cmd (list "--resume" resume-session-id))))
 
-    ;; Add verbose flag
+    ;; Add verbose flag (required for stream-json format)
     (setq cmd (append cmd (list "--verbose")))
 
-    ;; Add optional parameters
-    (when (matisse--get-current-model)
-      (setq cmd (append cmd (list "--model" (matisse--get-current-model)))))
+    ;; Add model (from options or current model)
+    (let ((model (or (plist-get options :model) (matisse--get-current-model))))
+      (when model
+        (setq cmd (append cmd (list "--model" model)))))
+
+    ;; Add temperature and max-tokens (from customization)
     (when matisse-temperature
       (setq cmd (append cmd (list "--temperature"
                                   (number-to-string matisse-temperature)))))
     (when matisse-max-tokens
       (setq cmd (append cmd (list "--max-tokens"
                                   (number-to-string matisse-max-tokens)))))
-    (when matisse-allowed-tools
-      (setq cmd (append cmd (list "--allowedTools" matisse-allowed-tools))))
 
-    ;; Add setting sources to load user/project/local subagents
-    (when matisse-setting-sources
-      (setq cmd (append cmd (list "--setting-sources" matisse-setting-sources))))
+    ;; Add allowed tools (from options or customization)
+    (let ((allowed-tools (or (plist-get options :allowed-tools) matisse-allowed-tools)))
+      (when allowed-tools
+        (setq cmd (append cmd (list "--allowedTools" allowed-tools)))))
 
-    ;; Add aggressive subagent prompt if configured
-    (when (and matisse-aggressive-subagent-prompt
-               (not (string-empty-p matisse-aggressive-subagent-prompt)))
-      (setq cmd (append cmd (list "--append-system-prompt"
-                                  matisse-aggressive-subagent-prompt))))
+    ;; Add disallowed tools (new feature from options)
+    (when-let* ((disallowed-tools (plist-get options :disallowed-tools)))
+      (setq cmd (append cmd (list "--disallowedTools" disallowed-tools))))
+
+    ;; Add additional directories (new feature from options)
+    (when-let* ((add-dirs (plist-get options :add-dirs)))
+      (dolist (dir add-dirs)
+        (setq cmd (append cmd (list "--add-dir" dir)))))
+
+    ;; Add setting sources (from options or customization)
+    (let ((setting-sources (or (plist-get options :setting-sources) matisse-setting-sources)))
+      (when setting-sources
+        (setq cmd (append cmd (list "--setting-sources" setting-sources)))))
+
+    ;; Add system prompt (from options or aggressive subagent prompt)
+    (let ((system-prompt (or (plist-get options :system-prompt)
+                            (when (and matisse-aggressive-subagent-prompt
+                                      (not (string-empty-p matisse-aggressive-subagent-prompt)))
+                              matisse-aggressive-subagent-prompt))))
+      (when system-prompt
+        (setq cmd (append cmd (list "--append-system-prompt" system-prompt)))))
 
     ;; Log the command
     (matisse--debug-log "Starting process%s, command: %s"
@@ -4037,8 +4062,22 @@ PROCESS is the Claude process, EVENT is the process status change."
           (matisse--debug-log "Unhandled process event: %s" event)))))))
 
 (defun matisse--start-process ()
-  "Start the Claude Code process with streaming JSON."
-  (matisse--create-process-with-options nil nil))
+  "Start the Claude Code process with streaming JSON.
+Uses options from `matisse--shell-context' if available."
+  (let* ((continue-flag (when matisse--shell-context
+                         (plist-get matisse--shell-context :continue)))
+         (resume-id (when matisse--shell-context
+                     (plist-get matisse--shell-context :resume)))
+         (options (when matisse--shell-context
+                   (list :model (plist-get matisse--shell-context :model)
+                         :permission-mode (plist-get matisse--shell-context :permission-mode)
+                         :allowed-tools (plist-get matisse--shell-context :allowed-tools)
+                         :disallowed-tools (plist-get matisse--shell-context :disallowed-tools)
+                         :add-dirs (plist-get matisse--shell-context :add-dirs)
+                         :system-prompt (plist-get matisse--shell-context :system-prompt)
+                         :setting-sources (plist-get matisse--shell-context :setting-sources)
+                         :verbose (plist-get matisse--shell-context :verbose)))))
+    (matisse--create-process-with-options resume-id continue-flag options)))
 
 (defun matisse--send-message (text)
   "Send TEXT message to Claude Code process."
@@ -4363,27 +4402,14 @@ Starts in the project root if in a project, otherwise in `default-directory'."
     buffer))
 
 ;;;###autoload
-(defun matisse-start-in-directory (directory)
-  "Create a new Matisse Claude Code shell session starting in DIRECTORY.
-Prompts for the directory to use, defaulting to `default-directory'."
-  (interactive (list (read-directory-name "Start matisse in directory: " default-directory nil t)))
-  (matisse--validate-setup)
-
-  ;; Capture current buffer selection before switching to matisse shell
-  (let ((selection-info (matisse--get-selection-info)))
-    (when selection-info
-      (setq matisse--last-selection selection-info)))
-
-  ;; Use the selected directory
-  (let* ((initial-dir (expand-file-name directory))
-         (buffer-name (matisse--generate-buffer-name initial-dir))
-         ;; Create shell context with buffer name and initial directory
-         (shell-context (list :buffer-name buffer-name :initial-directory initial-dir))
-         (buffer (matisse--shell-start buffer-name shell-context)))
-    ;; Set default-directory in the new buffer to ensure process starts there
-    (with-current-buffer buffer
-      (setq default-directory initial-dir))
-    buffer))
+(defun matisse-start-with-options ()
+  "Start a new Matisse session with custom options via transient menu.
+Provides an interactive interface to configure all Claude Code CLI arguments
+including model, permissions, working directory, and more."
+  (interactive)
+  (if (fboundp 'matisse-start-transient)
+      (matisse-start-transient)
+    (user-error "Transient package not available. Install transient.el to use this feature")))
 
 ;;;###autoload
 (defun matisse-select-session ()
@@ -5954,6 +5980,13 @@ SHELL-CONTEXT contains integration information from main matisse system."
       ;; Initialize shell mode
       (matisse-shell-mode)
 
+      ;; Set buffer-local variables from shell-context
+      (when shell-context
+        (when-let* ((permission-mode (plist-get shell-context :permission-mode)))
+          (setq matisse--current-permission-mode permission-mode))
+        (when-let* ((model (plist-get shell-context :model)))
+          (setq matisse--current-model model)))
+
       ;; Track new buffer in MRU list
       (matisse--update-mru buffer)
 
@@ -6716,7 +6749,7 @@ DATA is the raw image data."
   (let ((map (make-sparse-keymap)))
     ;; Session Management
     (define-key map "s" #'matisse)
-    (define-key map "S" #'matisse-start-in-directory)
+    (define-key map "N" #'matisse-start-with-options)
     (define-key map "w" #'matisse-select-session)
     (define-key map "r" #'matisse-resume)
     (define-key map "c" #'matisse-continue)
@@ -6755,7 +6788,7 @@ Use \\[describe-keymap] to see all available commands.")
     "Matisse Commands Menu"
     [["Session Management"
       ("s" "Start" matisse)
-      ("S" "Start in directory" matisse-start-in-directory)
+      ("N" "New with options..." matisse-start-with-options)
       ("w" "Select session" matisse-select-session)
       ("r" "Resume session" matisse-resume)
       ("c" "Continue last" matisse-continue)
@@ -6776,6 +6809,96 @@ Use \\[describe-keymap] to see all available commands.")
       ("@" "Insert current file reference" matisse-insert-file-reference)
       ("f" "Copy file reference" matisse-copy-file-reference)
       ("F" "Insert file reference (find file)" matisse-insert-file-reference-with-prompt)]]))
+
+  (transient-define-prefix matisse-start-transient ()
+    "Start a new Matisse session with custom options."
+    ["Session Type"
+     ("-c" "Continue last conversation" "--continue")
+     ("-r" "Resume session" "--resume=" :prompt "Session ID: ")
+     ("-d" "Working directory" "--directory=" :reader transient-read-directory)]
+    ["Model & Permissions"
+     ("-m" "Model" "--model=" :choices ("sonnet" "opus" "haiku"))
+     ("-p" "Permission mode" "--permission-mode=" :choices ("default" "plan" "acceptEdits" "bypassPermissions"))]
+    ["Tool Permissions"
+     ("-a" "Allowed tools" "--allowedTools=" :prompt "Allowed tools (e.g., Bash(git:*)): ")
+     ("-D" "Disallowed tools" "--disallowedTools=" :prompt "Disallowed tools (e.g., Bash(rm:*)): ")]
+    ["Additional Options"
+     ("-A" "Additional directories" "--add-dir=" :prompt "Additional directory: ")
+     ("-s" "System prompt" "--append-system-prompt=" :prompt "System prompt: ")
+     ("-S" "Setting sources" "--setting-sources=" :prompt "Setting sources: " :init-value (lambda (_obj) "user,project,local"))
+     ("-v" "Verbose logging" "--verbose")]
+    ["Actions"
+     ("s" "Start with options" matisse--start-with-transient-args)
+     ("q" "Quit" transient-quit-one)])
+
+  (defun matisse--start-with-transient-args (&optional args)
+    "Start a new Matisse session using transient ARGS.
+If ARGS is nil, uses `transient-args' to get current transient arguments."
+    (interactive (list (transient-args 'matisse-start-transient)))
+    (matisse--validate-setup)
+
+    ;; Parse transient arguments
+    (let* ((continue-flag (member "--continue" args))
+           (resume-session-id nil)
+           (working-dir nil)
+           (model nil)
+           (permission-mode nil)
+           (allowed-tools nil)
+           (disallowed-tools nil)
+           (add-dirs nil)
+           (system-prompt nil)
+           (setting-sources nil)
+           (verbose-flag (member "--verbose" args)))
+
+      ;; Parse option arguments
+      (dolist (arg args)
+        (cond
+         ((string-prefix-p "--resume=" arg)
+          (setq resume-session-id (substring arg 9)))
+         ((string-prefix-p "--directory=" arg)
+          (setq working-dir (substring arg 12)))
+         ((string-prefix-p "--model=" arg)
+          (setq model (substring arg 8)))
+         ((string-prefix-p "--permission-mode=" arg)
+          (setq permission-mode (substring arg 18)))
+         ((string-prefix-p "--allowedTools=" arg)
+          (setq allowed-tools (substring arg 15)))
+         ((string-prefix-p "--disallowedTools=" arg)
+          (setq disallowed-tools (substring arg 18)))
+         ((string-prefix-p "--add-dir=" arg)
+          (push (substring arg 10) add-dirs))
+         ((string-prefix-p "--append-system-prompt=" arg)
+          (setq system-prompt (substring arg 23)))
+         ((string-prefix-p "--setting-sources=" arg)
+          (setq setting-sources (substring arg 18)))))
+
+      ;; Capture current buffer selection before switching to matisse shell
+      (let ((selection-info (matisse--get-selection-info)))
+        (when selection-info
+          (setq matisse--last-selection selection-info)))
+
+      ;; Determine working directory
+      (let* ((initial-dir (or working-dir (matisse--get-working-directory)))
+             (buffer-name (matisse--generate-buffer-name initial-dir))
+             (shell-context (list :buffer-name buffer-name
+                                 :initial-directory initial-dir
+                                 :model model
+                                 :permission-mode permission-mode
+                                 :allowed-tools allowed-tools
+                                 :disallowed-tools disallowed-tools
+                                 :add-dirs (nreverse add-dirs)
+                                 :system-prompt system-prompt
+                                 :setting-sources setting-sources
+                                 :verbose verbose-flag
+                                 :continue continue-flag
+                                 :resume resume-session-id))
+             (buffer (matisse--shell-start buffer-name shell-context)))
+
+        ;; Set default-directory in the new buffer
+        (with-current-buffer buffer
+          (setq default-directory initial-dir))
+
+        buffer)))
 
 (defun matisse-menu ()
   "Show the Matisse transient menu.
