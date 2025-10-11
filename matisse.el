@@ -145,6 +145,20 @@ and when responding to permission prompts."
   :type 'boolean
   :group 'matisse)
 
+(defcustom matisse-session-list-auto-refresh t
+  "Whether to automatically refresh the matisse session list.
+When non-nil, the session list buffer will automatically update
+every `matisse-session-list-refresh-interval' seconds to show
+current session statuses."
+  :type 'boolean
+  :group 'matisse)
+
+(defcustom matisse-session-list-refresh-interval 2.0
+  "Interval in seconds for auto-refreshing the session list.
+Only applies when `matisse-session-list-auto-refresh' is non-nil."
+  :type 'number
+  :group 'matisse)
+
 (defcustom matisse-verbose-mode nil
   "Whether to display messages in full without truncation.
 When nil, long messages may be truncated with […] to keep the display concise.
@@ -1212,6 +1226,9 @@ start-char, end-char, text, has-selection.")
 
 (defvar-local matisse--overlay-timer nil
   "Idle timer for applying overlays during streaming.")
+
+(defvar-local matisse--session-list-timer nil
+  "Timer for auto-refreshing the session list buffer.")
 
 (defvar-local matisse--overlay-update-scheduled nil
   "Flag indicating an overlay update is already scheduled.")
@@ -2545,7 +2562,16 @@ Returns list: (emoji-icon nerd-icon nerd-face ascii-text)."
            matisse-nerd-icon-modeline-permission-face matisse-ascii-icon-modeline-permission))
     (:modeline-active
      (list matisse-emoji-icon-modeline-active matisse-nerd-icon-modeline-active
-           matisse-nerd-icon-modeline-active-face nil))))
+           matisse-nerd-icon-modeline-active-face nil))
+    ;; Session list status icons
+    (:status-working
+     (list "⏳" "" 'matisse-nerd-icon-orange ""))
+    (:status-permission
+     (list matisse-emoji-icon-permission matisse-nerd-icon-permission 'matisse-nerd-icon-yellow "?"))
+    (:status-idle
+     (list matisse-emoji-icon-success matisse-nerd-icon-success matisse-nerd-icon-success-face "ok"))
+    (:status-not-started
+     (list "" "" nil ""))))
 
 (defun matisse--get-icon (icon-type &optional tool-name)
   "Get formatted icon for ICON-TYPE based on current icon mode.
@@ -2566,7 +2592,7 @@ Icon types: :tool, :success, :performance, :command, :permission,
            (setq icon (if (< (mod matisse--spinner-index 2) 1)
                           (nth 0 (matisse--get-icon-data :modeline-active))
                         (nth 0 (matisse--get-icon-data :modeline-default)))))
-         (concat (matisse--apply-icon-face-properties icon) " ")))
+         (if (string-empty-p icon) "" (concat (matisse--apply-icon-face-properties icon) " "))))
       ('nerd-icons
        (let ((icon (nth 1 icon-data))
              (face (nth 2 icon-data)))
@@ -2577,7 +2603,7 @@ Icon types: :tool, :success, :performance, :command, :permission,
                      face (nth 2 (matisse--get-icon-data :modeline-active)))
              (setq icon (nth 1 (matisse--get-icon-data :modeline-default))
                    face (nth 2 (matisse--get-icon-data :modeline-default)))))
-         (concat (matisse--apply-icon-face-properties icon face) " ")))
+         (if (string-empty-p icon) "" (concat (matisse--apply-icon-face-properties icon face) " "))))
       ('ascii
        (let ((text (nth 3 icon-data)))
          ;; For modeline-active in ascii mode, use spinner chars for animation
@@ -4410,6 +4436,71 @@ including model, permissions, working directory, and more."
   (if (fboundp 'matisse-start-transient)
       (matisse-start-transient)
     (user-error "Transient package not available. Install transient.el to use this feature")))
+
+(defun matisse--get-status-with-icon (status-text)
+  "Get STATUS-TEXT formatted with appropriate icon based on status type."
+  (let* ((icon-type (cond
+                     ((string= status-text "Working") :status-working)
+                     ((string= status-text "Awaiting permission") :status-permission)
+                     ((string= status-text "Idle") :status-idle)
+                     ((string= status-text "Not started") :status-not-started)
+                     (t nil)))
+         (icon (when icon-type (matisse--get-icon icon-type))))
+    (if icon
+        (concat icon status-text)
+      status-text)))
+
+(defun matisse--get-session-status (buffer)
+  "Get the status string for matisse session in BUFFER."
+  (with-current-buffer buffer
+    (let ((status (cond
+                   (matisse--pending-permission-request "Awaiting permission")
+                   (matisse--waiting-for-response "Working")
+                   ((and matisse--process (process-live-p matisse--process)) "Idle")
+                   (t "Not started"))))
+      (matisse--get-status-with-icon status))))
+
+(defun matisse--generate-session-entries ()
+  "Generate list of entries for matisse session list.
+Returns list in format suitable for `tabulated-list-entries'."
+  (let ((matisse-buffers (seq-filter (lambda (buf)
+                                       (with-current-buffer buf
+                                         (derived-mode-p 'matisse-shell-mode)))
+                                     (buffer-list))))
+    (mapcar (lambda (buf)
+              (let* ((name (buffer-name buf))
+                     (dir (with-current-buffer buf
+                            (or matisse--initial-directory default-directory)))
+                     (status (matisse--get-session-status buf)))
+                (list buf (vector name dir status))))
+            matisse-buffers)))
+
+(defun matisse-session-list-select ()
+  "Select the matisse session at point and switch to it."
+  (interactive)
+  (when-let* ((entry (tabulated-list-get-entry))
+              (buffer (tabulated-list-get-id)))
+    (quit-window)
+    (switch-to-buffer buffer)))
+
+;;;###autoload
+(defun matisse-list-sessions ()
+  "Display a list of all active matisse sessions.
+Shows buffer name, directory, and current status for each session.
+Press RET to switch to a session, `g' to refresh the list."
+  (interactive)
+  (let ((matisse-buffers (seq-filter (lambda (buf)
+                                       (with-current-buffer buf
+                                         (derived-mode-p 'matisse-shell-mode)))
+                                     (buffer-list))))
+    (if (null matisse-buffers)
+        (message "No matisse sessions found")
+      (let ((buffer (get-buffer-create "*Matisse Sessions*")))
+        (with-current-buffer buffer
+          (matisse-session-list-mode)
+          (setq tabulated-list-entries (matisse--generate-session-entries))
+          (tabulated-list-print t))
+        (switch-to-buffer buffer)))))
 
 ;;;###autoload
 (defun matisse-select-session ()
@@ -6751,6 +6842,7 @@ DATA is the raw image data."
     (define-key map "s" #'matisse)
     (define-key map "N" #'matisse-start-with-options)
     (define-key map "w" #'matisse-select-session)
+    (define-key map "l" #'matisse-list-sessions)
     (define-key map "r" #'matisse-resume)
     (define-key map "c" #'matisse-continue)
     (define-key map "q" #'matisse-quit)
@@ -6790,6 +6882,7 @@ Use \\[describe-keymap] to see all available commands.")
       ("s" "Start" matisse)
       ("N" "New with options..." matisse-start-with-options)
       ("w" "Select session" matisse-select-session)
+      ("l" "List sessions" matisse-list-sessions)
       ("r" "Resume session" matisse-resume)
       ("c" "Continue last" matisse-continue)
       ("q" "Quit" matisse-quit)]
@@ -7049,6 +7142,72 @@ globally using intelligent directory-based session selection."
     (error "Claude Code executable not found at: %s" matisse-claude-code-path))
   (unless (matisse--get-api-key)
     (error "No API key configured. Set `matisse-api-key' or use auth-source")))
+
+;;;; Session List Mode
+(define-derived-mode matisse-session-list-mode tabulated-list-mode "Matisse-Sessions"
+  "Major mode for listing and selecting matisse sessions.
+\\{matisse-session-list-mode-map}"
+  (setq tabulated-list-format [("Buffer" 30 t)
+                                ("Directory" 50 t)
+                                ("Status" 20 t)])
+  (setq tabulated-list-padding 2)
+  (setq tabulated-list-sort-key (cons "Buffer" nil))
+  (add-hook 'tabulated-list-revert-hook #'matisse-list-sessions--refresh nil t)
+  (tabulated-list-init-header)
+
+  ;; Initialize timer variable
+  (setq-local matisse--session-list-timer nil)
+
+  ;; Start auto-refresh if enabled
+  (when matisse-session-list-auto-refresh
+    (matisse-session-list--start-auto-refresh))
+
+  ;; Add cleanup hook
+  (add-hook 'kill-buffer-hook #'matisse-session-list--stop-auto-refresh nil t))
+
+(defun matisse-list-sessions--refresh ()
+  "Refresh the matisse session list."
+  (setq tabulated-list-entries (matisse--generate-session-entries)))
+
+(defun matisse-session-list--auto-refresh ()
+  "Auto-refresh function for the session list timer.
+Only refreshes if the buffer is live and visible."
+  (when (and (buffer-live-p (current-buffer))
+             (get-buffer-window (current-buffer) t))
+    (revert-buffer nil t)))
+
+(defun matisse-session-list--start-auto-refresh ()
+  "Start auto-refreshing the session list."
+  (when (and matisse-session-list-auto-refresh
+             (not matisse--session-list-timer))
+    (setq matisse--session-list-timer
+          (run-at-time matisse-session-list-refresh-interval
+                       matisse-session-list-refresh-interval
+                       (lambda ()
+                         (when-let* ((buf (get-buffer "*Matisse Sessions*")))
+                           (with-current-buffer buf
+                             (matisse-session-list--auto-refresh))))))))
+
+(defun matisse-session-list--stop-auto-refresh ()
+  "Stop auto-refreshing the session list."
+  (when matisse--session-list-timer
+    (cancel-timer matisse--session-list-timer)
+    (setq matisse--session-list-timer nil)))
+
+(defun matisse-session-list-toggle-auto-refresh ()
+  "Toggle auto-refresh for the session list."
+  (interactive)
+  (if matisse--session-list-timer
+      (progn
+        (matisse-session-list--stop-auto-refresh)
+        (message "Auto-refresh disabled"))
+    (progn
+      (matisse-session-list--start-auto-refresh)
+      (message "Auto-refresh enabled (every %.1fs)" matisse-session-list-refresh-interval))))
+
+(define-key matisse-session-list-mode-map (kbd "RET") #'matisse-session-list-select)
+(define-key matisse-session-list-mode-map (kbd "g") #'revert-buffer)
+(define-key matisse-session-list-mode-map (kbd "a") #'matisse-session-list-toggle-auto-refresh)
 
 ;;;; Major Mode
 (define-derived-mode matisse-shell-mode fundamental-mode "Matisse-Shell"
