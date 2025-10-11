@@ -1252,7 +1252,7 @@ the abbreviated directory path."
          (context-name (if proj
                            (project-name proj)
                          (abbreviate-file-name (directory-file-name dir)))))
-    (format "*M %s" context-name)))
+    (format "*matisse[%s]" context-name)))
 
 (defun matisse--generate-buffer-name (dir)
   "Generate a unique matisse shell buffer name for directory DIR.
