@@ -6773,9 +6773,9 @@ Use \\[describe-keymap] to see all available commands.")
       ("P" "Toggle performance" matisse-toggle-performance-summary)
       ("T" "Show tokens" matisse-show-tokens)]
      ["File References"
-      ("@" "Insert file reference" matisse-insert-file-reference)
+      ("@" "Insert current file reference" matisse-insert-file-reference)
       ("f" "Copy file reference" matisse-copy-file-reference)
-      ("F" "Insert file (with prompt)" matisse-insert-file-reference-with-prompt)]]))
+      ("F" "Insert file reference (find file)" matisse-insert-file-reference-with-prompt)]]))
 
 (defun matisse-menu ()
   "Show the Matisse transient menu.
