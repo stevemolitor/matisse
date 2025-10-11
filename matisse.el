@@ -4342,7 +4342,7 @@ Returns a string like \\='in matisse.el:45\\=' or \\='in matisse.el:45-47\\='."
      ((string= mode "plan")
       (propertize "[PLAN]" 'face '(:inherit success :weight 'bold)))
      ((string= mode "acceptEdits")
-      (propertize "[ACCEPT EDITS]" 'face 'matisse-accept-mode-face :weight 'bold))
+      (propertize "[ACCEPT]" 'face 'matisse-accept-mode-face :weight 'bold))
      ((string= mode "bypassPermissions")
       (propertize "[BYPASS]" 'face '(:inherit error :weight :bold)))
      ((string= mode "yolo")
