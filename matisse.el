@@ -1252,7 +1252,7 @@ the abbreviated directory path."
          (context-name (if proj
                            (project-name proj)
                          (abbreviate-file-name (directory-file-name dir)))))
-    (format "*matisse[%s]" context-name)))
+    (format "*M %s" context-name)))
 
 (defun matisse--generate-buffer-name (dir)
   "Generate a unique matisse shell buffer name for directory DIR.
@@ -4321,7 +4321,7 @@ selection content rather than file references to avoid token bloat."
 
 (defun matisse--format-selection-status ()
   "Format selection status for mode-line display.
-Returns a string like \\='in matisse.el:45\\=' or \\='in matisse.el:45-47\\='."
+Returns a string like \\='@matisse.el:45\\=' or \\='@matisse.el:45-47\\='."
   (when (and matisse-send-selection-p matisse--last-selection)
     (let* ((file-path (alist-get 'file-path matisse--last-selection))
            (start-line (alist-get 'start-line matisse--last-selection))
@@ -4331,9 +4331,9 @@ Returns a string like \\='in matisse.el:45\\=' or \\='in matisse.el:45-47\\='."
         (let ((file-name (file-name-nondirectory file-path)))
           (if has-selection
               (if (= start-line end-line)
-                  (format "in %s:%d" file-name start-line)
-                (format "in %s:%d-%d" file-name start-line end-line))
-            (format "in %s:%d" file-name start-line)))))))
+                  (format "@%s:%d" file-name start-line)
+                (format "@%s:%d-%d" file-name start-line end-line))
+            (format "@%s:%d" file-name start-line)))))))
 
 (defun matisse--format-permission-mode ()
   "Format permission mode for mode-line display with color."
