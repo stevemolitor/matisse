@@ -1124,6 +1124,15 @@ Cleared after the first write tool is executed.")
 (defvar-local matisse--tokens-since-compact 0
   "Tokens used since last compaction.")
 
+(defvar-local matisse--cache-creation-tokens 0
+  "Tokens used for cache creation in last response.")
+
+(defvar-local matisse--cache-read-tokens 0
+  "Tokens read from cache in last response.")
+
+(defvar-local matisse--actual-prompt-tokens 0
+  "Actual prompt size including cache tokens from last response.")
+
 (defvar-local matisse--resumed-session nil
   "Non-nil when session was resumed/continued from previous conversation.")
 
@@ -2722,7 +2731,17 @@ JSON-OBJ is the result message containing usage data."
   (let* ((usage (alist-get 'usage json-obj))
          (input-tokens (when usage (alist-get 'input_tokens usage)))
          (output-tokens (when usage (alist-get 'output_tokens usage)))
+         (cache-creation (when usage (alist-get 'cache_creation_input_tokens usage)))
+         (cache-read (when usage (alist-get 'cache_read_input_tokens usage)))
          (total-this-turn (+ (or input-tokens 0) (or output-tokens 0))))
+
+    ;; Track cache tokens and actual prompt size
+    (setq matisse--cache-creation-tokens (or cache-creation 0))
+    (setq matisse--cache-read-tokens (or cache-read 0))
+    (setq matisse--actual-prompt-tokens
+          (+ (or input-tokens 0)
+             (or cache-creation 0)
+             (or cache-read 0)))
 
     (when (> total-this-turn 0)
       (setq matisse--total-tokens-used (+ matisse--total-tokens-used total-this-turn))
@@ -2732,10 +2751,11 @@ JSON-OBJ is the result message containing usage data."
       (when (>= matisse--tokens-since-compact (matisse--warning-threshold))
         (matisse--suggest-compaction))
 
-      (matisse--debug-log "Tokens this turn: %d (total: %d, since compact: %d)"
+      (matisse--debug-log "Tokens this turn: %d (total: %d, since compact: %d, actual prompt: %d)"
                           total-this-turn
                           matisse--total-tokens-used
-                          matisse--tokens-since-compact)
+                          matisse--tokens-since-compact
+                          matisse--actual-prompt-tokens)
 
       ;; Update mode line to show new token count
       (matisse--update-mode-line))))
@@ -2866,17 +2886,26 @@ for threshold checks.  Returns estimated token count as integer."
   "Format token usage for mode line display."
   (when (and matisse-show-token-usage (> matisse--tokens-since-compact 0))
     (let* ((tokens-k (/ matisse--tokens-since-compact 1000))
+           (prompt-k (/ matisse--actual-prompt-tokens 1000))
            (threshold (matisse--auto-compact-threshold))
            (percentage (if (> threshold 0)
                            (* 100.0 (/ (float matisse--tokens-since-compact)
                                       threshold))
                          0))
+           ;; Warning based on actual prompt size approaching 200k limit
+           (prompt-warning (> prompt-k 150))
            (face (cond
                   ((>= percentage 90) '(:inherit error :weight bold))
                   ((>= percentage 70) 'warning)
                   ((>= percentage 50) 'warning)
-                  (t 'shadow))))
-      (propertize (format "[%dk]" tokens-k) 'face face))))
+                  (t 'shadow)))
+           (display-text (if (> prompt-k 0)
+                            (format "%s[%dk/~%dk]"
+                                    (if prompt-warning "⚠️" "")
+                                    tokens-k
+                                    prompt-k)
+                          (format "[%dk]" tokens-k))))
+      (propertize display-text 'face face))))
 
 ;;;; JSON Protocol
 ;; Buffer-local variable to store pending images
@@ -4953,10 +4982,18 @@ Works globally - finds the appropriate matisse buffer if not already in one."
                                (format " (%.0f%% of threshold)"
                                        (* 100.0 (/ (float matisse--tokens-since-compact)
                                                   threshold)))
-                             "")))
-          (message "Tokens: %d total, %d since last reset%s"
-                   matisse--total-tokens-used
+                             ""))
+               (prompt-k (/ matisse--actual-prompt-tokens 1000))
+               (cache-info (if (or (> matisse--cache-creation-tokens 0)
+                                  (> matisse--cache-read-tokens 0))
+                              (format ", cache: %d created + %d read"
+                                      matisse--cache-creation-tokens
+                                      matisse--cache-read-tokens)
+                            "")))
+          (message "Tokens: %d conversation, ~%dk actual prompt%s%s"
                    matisse--tokens-since-compact
+                   prompt-k
+                   cache-info
                    percentage)))
     (user-error "No matisse session found")))
 
