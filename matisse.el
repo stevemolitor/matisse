@@ -2889,24 +2889,21 @@ for threshold checks.  Returns estimated token count as integer."
   "Format token usage for mode line display."
   (when (and matisse-show-token-usage (> matisse--tokens-since-compact 0))
     (let* ((tokens-k (/ matisse--tokens-since-compact 1000))
-           (prompt-k (/ matisse--actual-prompt-tokens 1000))
            (threshold (matisse--auto-compact-threshold))
            (percentage (if (> threshold 0)
                            (* 100.0 (/ (float matisse--tokens-since-compact)
                                       threshold))
                          0))
-           ;; Warning based on actual prompt size approaching 200k limit
-           (prompt-warning (> prompt-k 150))
+           ;; Warning based on percentage toward auto-compact threshold
+           (show-warning (>= percentage 70))
            (face (cond
                   ((>= percentage 90) '(:inherit error :weight bold))
                   ((>= percentage 70) 'warning)
                   ((>= percentage 50) 'warning)
                   (t 'shadow)))
-           (display-text (if (> prompt-k 0)
-                            (format "%s[%dk]"
-                                    (if prompt-warning "⚠️" "")
-                                    prompt-k)
-                          (format "[%dk]" tokens-k))))
+           (display-text (format "%s[%dk]"
+                                (if show-warning "⚠️" "")
+                                tokens-k)))
       (propertize display-text 'face face))))
 
 ;;;; JSON Protocol
@@ -4258,22 +4255,17 @@ to read data and prevent pipe buffer from filling up."
   "Internal function to format and send TEXT message to Claude Code process.
 Checks for auto-compact before sending (matches SDK's pre-API-call check)."
   ;; Auto-compact check BEFORE sending (like SDK does before API call)
-  ;; Check actual prompt size (cache-aware) if available, otherwise fall back to conversation tokens
+  ;; Use tokens-since-compact (input+output) not cache-inclusive prompt size
   (if (and matisse-auto-compact-enabled
-           (>= (if (> matisse--actual-prompt-tokens 0)
-                   matisse--actual-prompt-tokens
-                 matisse--tokens-since-compact)
+           (>= matisse--tokens-since-compact
                (matisse--auto-compact-threshold))
            (not (string-prefix-p "/" text))
            (not matisse--auto-compact-in-progress))
       ;; Trigger auto-compact instead of sending
       (progn
-        (let ((check-tokens (if (> matisse--actual-prompt-tokens 0)
-                               matisse--actual-prompt-tokens
-                             matisse--tokens-since-compact)))
-          (matisse--debug-log "Auto-compact threshold reached (%d actual prompt >= %d threshold), triggering before send"
-                              check-tokens
-                              (matisse--auto-compact-threshold)))
+        (matisse--debug-log "Auto-compact threshold reached (%d tokens >= %d threshold), triggering before send"
+                            matisse--tokens-since-compact
+                            (matisse--auto-compact-threshold))
         (setq matisse--auto-compact-in-progress t)
         (when matisse--shell-context
           (funcall (plist-get matisse--shell-context :write-output)
