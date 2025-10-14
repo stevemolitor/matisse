@@ -3212,7 +3212,8 @@ Returns dynamically discovered commands merged with local commands."
           (save-excursion
             (cond
              ;; Complete @ file references
-             ((looking-back "@[^ \t\n]*" input-start)
+             ;; Match @ followed by anything except tabs/newlines to allow spaces in paths
+             ((looking-back "@[^\t\n]*" input-start)
               (let ((end (point))
                     (start (save-excursion
                              (re-search-backward "@" input-start t)
