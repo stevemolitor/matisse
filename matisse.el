@@ -3761,8 +3761,78 @@ PARAMS contains sessionId and update fields."
                        (t
                         (matisse--debug-log "User message content: %s" content))))))
 
+                 ((equal (alist-get 'type json-obj) "error")
+                  ;; Handle error messages from Claude Code
+                  (matisse--handle-error-message json-obj))
+
                  (t
                   (matisse--debug-log "Unhandled message type: %s" (alist-get 'type json-obj))))))))))))
+
+(defun matisse--handle-error-message (json-obj)
+  "Handle error messages from Claude Code API.
+JSON-OBJ is the parsed error message with structure:
+  {\"type\":\"error\",\"error\":{\"type\":\"...\",\"message\":\"...\"}}"
+  (let* ((error-data (alist-get 'error json-obj))
+         (error-type (alist-get 'type error-data))
+         (error-message (alist-get 'message error-data)))
+
+    (matisse--debug-log "Received error from Claude: type=%s message=%s" error-type error-message)
+
+    (cond
+     ;; Handle "prompt is too long" errors
+     ((or (equal error-type "invalid_request_error")
+          (and error-message (string-match-p "prompt.*too.*long" error-message)))
+      (let ((token-info (when (string-match "\\([0-9]+\\) tokens > \\([0-9]+\\)" error-message)
+                         (cons (match-string 1 error-message)
+                               (match-string 2 error-message)))))
+        (matisse--debug-log "Prompt too long error detected: %s" error-message)
+
+        ;; Display error to user
+        (when (and matisse--shell-context
+                   (plist-get matisse--shell-context :write-output))
+          (let ((error-display
+                 (if token-info
+                     (format "\n⚠️  ERROR: Prompt too long (%s tokens > %s maximum)\n"
+                            (car token-info) (cdr token-info))
+                   (format "\n⚠️  ERROR: %s\n" error-message))))
+            (funcall (plist-get matisse--shell-context :write-output) error-display)))
+
+        ;; Trigger automatic compaction if enabled
+        (if matisse-auto-compact-enabled
+            (progn
+              (message "Prompt too long - triggering automatic compaction...")
+              (matisse--debug-log "Auto-compacting due to 'prompt too long' error")
+              (when (and matisse--shell-context
+                         (plist-get matisse--shell-context :write-output))
+                (funcall (plist-get matisse--shell-context :write-output)
+                        "\n🔄 Auto-compacting conversation...\n"))
+              ;; Send compact command
+              (matisse--send-compact-command))
+          ;; Not auto-compacting - suggest manual compaction
+          (progn
+            (message "Prompt too long! Use /compact to continue or enable auto-compact.")
+            (when (and matisse--shell-context
+                       (plist-get matisse--shell-context :write-output))
+              (funcall (plist-get matisse--shell-context :write-output)
+                      "\n💡 Run /compact to reduce conversation size, or enable matisse-auto-compact-enabled\n"))))))
+
+     ;; Handle "overloaded" errors
+     ((equal error-type "overloaded_error")
+      (matisse--debug-log "Overloaded error detected - API is busy")
+      (message "Claude API is overloaded - please retry in a moment")
+      (when (and matisse--shell-context
+                 (plist-get matisse--shell-context :write-output))
+        (funcall (plist-get matisse--shell-context :write-output)
+                "\n⚠️  Claude API is overloaded. Please wait a moment and retry.\n")))
+
+     ;; Handle other errors
+     (t
+      (matisse--debug-log "Unhandled error type: %s" error-type)
+      (message "Claude API error: %s" (or error-message "Unknown error"))
+      (when (and matisse--shell-context
+                 (plist-get matisse--shell-context :write-output))
+        (funcall (plist-get matisse--shell-context :write-output)
+                (format "\n⚠️  ERROR: %s\n" (or error-message "Unknown error"))))))))
 
 (defun matisse--send-control-request (subtype &optional extra-params)
   "Send a control request to Claude with SUBTYPE and EXTRA-PARAMS.
