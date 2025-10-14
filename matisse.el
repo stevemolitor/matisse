@@ -3052,14 +3052,17 @@ The file path is tracked in `matisse--temp-files' for reference."
   "Convert TEXT to temp file reference if it exceeds threshold.
 If TEXT is longer than `matisse-large-prompt-threshold', writes
 it to a temp file and returns @ reference with optional PREFIX.
-Otherwise returns TEXT unchanged."
+Otherwise returns TEXT unchanged (with PREFIX if provided)."
   (if (and (stringp text) (> (length text) matisse-large-prompt-threshold))
       (let ((temp-file (matisse--write-arg-to-temp-file text)))
         (matisse--debug-log "Converted large text (%d chars) to temp file: %s" (length text) temp-file)
         (if prefix
             (format "%s @%s" prefix temp-file)
           (format "@%s" temp-file)))
-    text))
+    ;; Not large enough for file - return text with optional prefix
+    (if prefix
+        (format "%s %s" prefix text)
+      text)))
 
 (defun matisse--format-slash-command (text)
   "Format TEXT as a slash command for Claude Code.
