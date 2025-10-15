@@ -3392,7 +3392,9 @@ JSON-OBJ is the parsed JSON system message object from Claude Code."
           (when initial-tokens
             (setq matisse--total-tokens-used initial-tokens)
             (setq matisse--tokens-since-compact initial-tokens)
-            (message "Resumed session with %d tokens used" initial-tokens))))
+            (message "Resumed session with %d tokens used" initial-tokens)))
+        ;; Clear the flag after first init message so we don't show this again
+        (setq matisse--resumed-session nil))
 
       ;; Extract slash commands from init message
       ;; slash_commands is a vector of strings without "/" prefix
