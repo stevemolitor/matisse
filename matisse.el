@@ -46,9 +46,22 @@ You can set this in your init file or use auth-source."
   :group 'matisse)
 
 (defcustom matisse-default-model "sonnet"
-  "The default Claude model to use for new sessions."
-  :type '(choice (const :tag "Sonnet" "sonnet")
-                 (const :tag "Opus" "opus")
+  "The default Claude model to use for new sessions.
+
+Common model options:
+- \"sonnet\" - Sonnet 4.5 with 200K context (default)
+- \"claude-sonnet-4-5-20250929[1m]\" - Sonnet 4.5 with 1M context
+- \"opus\" - Opus 4 with 200K context
+- \"claude-opus-4-20250514[1m]\" - Opus 4 with 1M context
+
+The [1m] suffix enables extended 1M token context window.
+Requires API Tier 4+ access. Costs 2x input, 1.5x output for >200K tokens.
+
+When using [1m] models, also set `matisse-context-window' to 1000000."
+  :type '(choice (const :tag "Sonnet (200K)" "sonnet")
+                 (const :tag "Sonnet (1M)" "claude-sonnet-4-5-20250929[1m]")
+                 (const :tag "Opus (200K)" "opus")
+                 (const :tag "Opus (1M)" "claude-opus-4-20250514[1m]")
                  (string :tag "Custom model string"))
   :group 'matisse)
 
@@ -884,10 +897,25 @@ Smaller values make faster blinking, larger values make slower blinking."
 (defcustom matisse-context-window 200000
   "Context window size in tokens for current model.
 Used to calculate auto-compact and warning thresholds.
+
 Common values:
-- 200000 (200K) - Sonnet 4.5, Opus 4, default models
-- 1000000 (1M) - Models with [1m] suffix (e.g., claude-sonnet-4-5[1m])
-Adjust based on your model's actual context window."
+- 200000 (200K) - Default for model aliases like \"sonnet\", \"opus\"
+- 1000000 (1M) - Extended context models with [1m] suffix
+  Requires API Tier 4+ access
+  Costs 2x input, 1.5x output for prompts >200K tokens
+
+To use 1M context:
+1. Set `matisse-default-model\\=' to a [1m] model, e.g.:
+   \"claude-sonnet-4-5-20250929[1m]\"
+2. Set this variable to 1000000
+3. Matisse will automatically use appropriate thresholds
+
+IMPORTANT: This must match your model\\'s actual context window.
+- Model aliases (sonnet, opus) → 200K context
+- Models with [1m] suffix → 1M context
+- When in doubt, check: echo \\'model?\\' | claude --model YOUR_MODEL --print
+
+Note: Cache reads count toward this limit even though cached."
   :type 'integer
   :group 'matisse)
 
@@ -2733,48 +2761,63 @@ JSON-OBJ is the result message containing usage data."
          (output-tokens (when usage (alist-get 'output_tokens usage)))
          (cache-creation (when usage (alist-get 'cache_creation_input_tokens usage)))
          (cache-read (when usage (alist-get 'cache_read_input_tokens usage)))
-         (total-this-turn (+ (or input-tokens 0) (or output-tokens 0))))
+         ;; NEW tokens added to conversation (for accumulation/growth tracking)
+         ;; Don't count cache reads - they're reused content, not new tokens!
+         (new-tokens-this-turn (+ (or input-tokens 0)
+                                 (or cache-creation 0)
+                                 (or output-tokens 0)))
+         ;; ACTUAL prompt size Claude sees (for context limit checks)
+         ;; Cache reads DO count toward context window even though cached
+         (actual-prompt-tokens (+ (or input-tokens 0)
+                                 (or cache-creation 0)
+                                 (or cache-read 0))))
 
-    ;; Track cache tokens and actual prompt size
+    ;; Track cache tokens separately for debugging/reporting
     (setq matisse--cache-creation-tokens (or cache-creation 0))
     (setq matisse--cache-read-tokens (or cache-read 0))
-    (setq matisse--actual-prompt-tokens
-          (+ (or input-tokens 0)
-             (or cache-creation 0)
-             (or cache-read 0)))
+    (setq matisse--actual-prompt-tokens actual-prompt-tokens)
 
-    (when (> total-this-turn 0)
-      (setq matisse--total-tokens-used (+ matisse--total-tokens-used total-this-turn))
-      (setq matisse--tokens-since-compact (+ matisse--tokens-since-compact total-this-turn))
+    (when (> new-tokens-this-turn 0)
+      ;; Accumulate NEW tokens only (conversation growth)
+      (setq matisse--total-tokens-used (+ matisse--total-tokens-used new-tokens-this-turn))
+      (setq matisse--tokens-since-compact (+ matisse--tokens-since-compact new-tokens-this-turn))
 
-      ;; Check if we should suggest compaction (warn before auto-compact triggers)
-      (when (>= matisse--tokens-since-compact (matisse--warning-threshold))
-        (matisse--suggest-compaction))
+      ;; Check if PROMPT SIZE is approaching context window limit
+      (when (>= actual-prompt-tokens (matisse--warning-threshold))
+        (matisse--suggest-compaction actual-prompt-tokens))
 
-      (matisse--debug-log "Tokens this turn: %d (total: %d, since compact: %d, actual prompt: %d)"
-                          total-this-turn
-                          matisse--total-tokens-used
-                          matisse--tokens-since-compact
-                          matisse--actual-prompt-tokens)
+      (matisse--debug-log "Tokens - New: %d (input: %d [%d fresh + %d cache create], output: %d) | Prompt size: %d (+%d cache read) | Accumulated: %d"
+                          new-tokens-this-turn
+                          (+ (or input-tokens 0) (or cache-creation 0))
+                          (or input-tokens 0)
+                          (or cache-creation 0)
+                          (or output-tokens 0)
+                          actual-prompt-tokens
+                          (or cache-read 0)
+                          matisse--tokens-since-compact)
 
       ;; Update mode line to show new token count
       (matisse--update-mode-line))))
 
-(defun matisse--suggest-compaction ()
-  "Suggest compaction or inform about upcoming auto-compact."
-  (when matisse--shell-context
-    (funcall (plist-get matisse--shell-context :write-output)
-             (if matisse-auto-compact-enabled
-                 (format "\n⚠️  Context at %dk tokens (auto-compact at %dk threshold)...\n"
-                        (/ matisse--tokens-since-compact 1000)
-                        (/ (matisse--auto-compact-threshold) 1000))
-               (format "\n⚠️  Context at %dk tokens. Consider /compact or enable auto-compact.\n"
-                      (/ matisse--tokens-since-compact 1000)))))
-  (message (if matisse-auto-compact-enabled
-               (format "Context at %dk tokens (auto-compact at %dk threshold)"
-                      (/ matisse--tokens-since-compact 1000)
-                      (/ (matisse--auto-compact-threshold) 1000))
-             "Context is getting long. Consider /compact or enable auto-compact")))
+(defun matisse--suggest-compaction (&optional prompt-size)
+  "Suggest compaction or inform about upcoming auto-compact.
+PROMPT-SIZE is the actual prompt size that triggered the warning (optional)."
+  (let* ((display-tokens (or prompt-size matisse--tokens-since-compact))
+         (display-k (/ display-tokens 1000))
+         (threshold-k (/ (matisse--auto-compact-threshold) 1000))
+         (metric-label (if prompt-size "Prompt size" "Context")))
+    (when matisse--shell-context
+      (funcall (plist-get matisse--shell-context :write-output)
+               (if matisse-auto-compact-enabled
+                   (format "\n⚠️  %s at %dk tokens (auto-compact at %dk threshold)...\n"
+                          metric-label display-k threshold-k)
+                 (format "\n⚠️  %s at %dk tokens. Consider /compact or enable auto-compact.\n"
+                        metric-label display-k))))
+    (message (if matisse-auto-compact-enabled
+                 (format "%s at %dk tokens (auto-compact at %dk threshold)"
+                        metric-label display-k threshold-k)
+               (format "%s is getting long. Consider /compact or enable auto-compact"
+                      metric-label)))))
 
 (defun matisse--reset-token-count ()
   "Reset the tokens-since-compact counter and cache token tracking."
@@ -4021,8 +4064,12 @@ Returns the created process object."
          (current-permission-mode (or (plist-get options :permission-mode)
                                      matisse--current-permission-mode
                                      matisse-permission-mode))
+         ;; Map "yolo" to "default" for CLI (yolo is client-side only)
+         (cli-permission-mode (if (string= current-permission-mode "yolo")
+                                  "default"
+                                current-permission-mode))
          (cmd (list matisse-claude-code-path
-                    "--permission-mode" current-permission-mode
+                    "--permission-mode" cli-permission-mode
                     "--permission-prompt-tool" "stdio"
                     "--input-format" "stream-json"
                     "--output-format" "stream-json")))
@@ -4106,7 +4153,9 @@ Returns the created process object."
     ;; Claude Code CLI auto-initializes on startup and sends init message
     ;; Models and commands will be requested when we receive the init message
     ;; Set permission mode if needed (must wait for init)
-    (unless (string= current-permission-mode "default")
+    ;; Note: "yolo" is client-side only, so don't send it to CLI
+    (unless (or (string= current-permission-mode "default")
+                (string= current-permission-mode "yolo"))
       (let ((process matisse--process)
             (buffer (current-buffer))
             (desired-mode current-permission-mode))
@@ -4758,9 +4807,11 @@ Note: bypassPermissions mode can only be set at session startup via
   ;; Update mode-line
   (matisse--update-mode-line)
   ;; If we have an active process, send control request to switch mode
+  ;; Note: "yolo" is client-side only, so don't send it to CLI
   (if (and matisse--process (process-live-p matisse--process))
       (progn
-        (matisse--send-control-request "set_permission_mode" `((mode . ,mode)))
+        (unless (string= mode "yolo")
+          (matisse--send-control-request "set_permission_mode" `((mode . ,mode))))
         (matisse--show-permission-mode-message mode))
     ;; No active process, just update the setting
     (matisse--show-permission-mode-message mode)))
