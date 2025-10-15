@@ -2620,7 +2620,9 @@ Icon types: :tool, :success, :performance, :command, :permission,
         (effective-mode (if (and matisse-modeline-use-emoji
                                  (memq icon-type '(:modeline-default :modeline-permission :modeline-active)))
                             'emoji
-                          matisse-icons-mode)))
+                          matisse-icons-mode))
+        ;; Prompt icons should not have trailing space
+        (add-space (not (eq icon-type :prompt))))
     (pcase effective-mode
       ('emoji
        (let ((icon (nth 0 icon-data)))
@@ -2629,7 +2631,11 @@ Icon types: :tool, :success, :performance, :command, :permission,
            (setq icon (if (< (mod matisse--spinner-index 2) 1)
                           (nth 0 (matisse--get-icon-data :modeline-active))
                         (nth 0 (matisse--get-icon-data :modeline-default)))))
-         (if (string-empty-p icon) "" (concat (matisse--apply-icon-face-properties icon) " "))))
+         (if (string-empty-p icon)
+             ""
+           (if add-space
+               (concat (matisse--apply-icon-face-properties icon) " ")
+             (matisse--apply-icon-face-properties icon)))))
       ('nerd-icons
        (let ((icon (nth 1 icon-data))
              (face (nth 2 icon-data)))
@@ -2640,13 +2646,21 @@ Icon types: :tool, :success, :performance, :command, :permission,
                      face (nth 2 (matisse--get-icon-data :modeline-active)))
              (setq icon (nth 1 (matisse--get-icon-data :modeline-default))
                    face (nth 2 (matisse--get-icon-data :modeline-default)))))
-         (if (string-empty-p icon) "" (concat (matisse--apply-icon-face-properties icon face) " "))))
+         (if (string-empty-p icon)
+             ""
+           (if add-space
+               (concat (matisse--apply-icon-face-properties icon face) " ")
+             (matisse--apply-icon-face-properties icon face)))))
       ('ascii
        (let ((text (nth 3 icon-data)))
          ;; For modeline-active in ascii mode, use spinner chars for animation
          (when (eq icon-type :modeline-active)
            (setq text (nth matisse--spinner-index matisse--spinner-chars)))
-         (if (string-empty-p text) "" (concat text " "))))
+         (if (string-empty-p text)
+             ""
+           (if add-space
+               (concat text " ")
+             text))))
       (_ ""))))
 
 (defun matisse--format-progress-indicator (tool-name input-data)
@@ -6283,25 +6297,20 @@ end of buffer."
           (matisse--debug-log "Not at BOL, inserting newline")
           (insert "\n"))
 
-        ;; Insert prompt with properties - character gets special face, space doesn't
+        ;; Insert prompt character with face, then add space
         (let ((prompt-start (point)))
           (matisse--debug-log "Inserting prompt text at %d" prompt-start)
           (insert matisse--shell-prompt)
           (let ((prompt-end (point)))
-            ;; Apply face only to prompt character (exclude trailing space)
-            (when (and prompt-start (> prompt-end prompt-start))
-              ;; Calculate icon length by removing trailing whitespace
-              (let* ((prompt-text matisse--shell-prompt)
-                     (trimmed-text (string-trim-right prompt-text))
-                     (icon-length (length trimmed-text)))
-                ;; Only apply face if we have non-whitespace content
-                (when (> icon-length 0)
-                  (put-text-property prompt-start
-                                   (min prompt-end (+ prompt-start icon-length))
-                                   'face 'matisse-prompt-character-face)))
-              ;; Make entire prompt read-only
+            ;; Apply face to prompt character
+            (when (> prompt-end prompt-start)
+              (put-text-property prompt-start prompt-end
+                                 'face 'matisse-prompt-character-face)
+              ;; Make prompt character read-only
               (put-text-property prompt-start prompt-end 'read-only t)
               (put-text-property prompt-start prompt-end 'rear-nonsticky '(read-only face))))
+          ;; Insert space after prompt (not read-only, no special face)
+          (insert " ")
           (matisse--debug-log "Prompt inserted, now at point %d" (point)))
 
         ;; Position cursor for input
