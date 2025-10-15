@@ -2775,16 +2775,15 @@ JSON-OBJ is the result message containing usage data."
          (output-tokens (when usage (alist-get 'output_tokens usage)))
          (cache-creation (when usage (alist-get 'cache_creation_input_tokens usage)))
          (cache-read (when usage (alist-get 'cache_read_input_tokens usage)))
-         ;; NEW tokens added to conversation (for accumulation/growth tracking)
-         ;; Don't count cache reads - they're reused content, not new tokens!
-         (new-tokens-this-turn (+ (or input-tokens 0)
-                                 (or cache-creation 0)
-                                 (or output-tokens 0)))
          ;; ACTUAL prompt size Claude sees (for context limit checks)
-         ;; Cache reads DO count toward context window even though cached
+         ;; This includes everything: fresh input, cache creation, and cache reads
          (actual-prompt-tokens (+ (or input-tokens 0)
                                  (or cache-creation 0)
-                                 (or cache-read 0))))
+                                 (or cache-read 0)))
+         ;; NEW tokens added to conversation (only count output growth)
+         ;; Cache creation tokens represent SIZE of cached content (including history),
+         ;; not NEW content being added. Only output tokens grow the conversation.
+         (new-tokens-this-turn (or output-tokens 0)))
 
     ;; Track cache tokens separately for debugging/reporting
     (setq matisse--cache-creation-tokens (or cache-creation 0))
@@ -2796,38 +2795,39 @@ JSON-OBJ is the result message containing usage data."
       (setq matisse--total-tokens-used (+ matisse--total-tokens-used new-tokens-this-turn))
       (setq matisse--tokens-since-compact (+ matisse--tokens-since-compact new-tokens-this-turn))
 
-      ;; Check if conversation size is approaching context window limit
-      (when (>= matisse--tokens-since-compact (matisse--warning-threshold))
-        (matisse--suggest-compaction))
-
-      (matisse--debug-log "Tokens - New: %d (input: %d [%d fresh + %d cache create], output: %d) | Prompt size: %d (+%d cache read) | Accumulated: %d"
-                          new-tokens-this-turn
-                          (+ (or input-tokens 0) (or cache-creation 0))
-                          (or input-tokens 0)
-                          (or cache-creation 0)
+      (matisse--debug-log "Tokens - Output: %d | Prompt size: %d (fresh: %d, cache create: %d, cache read: %d) | Growth since compact: %d"
                           (or output-tokens 0)
                           actual-prompt-tokens
+                          (or input-tokens 0)
+                          (or cache-creation 0)
                           (or cache-read 0)
-                          matisse--tokens-since-compact)
+                          matisse--tokens-since-compact))
 
-      ;; Update mode line to show new token count
-      (matisse--update-mode-line))))
+    ;; Check if ACTUAL prompt size is approaching context window limit
+    ;; Use actual-prompt-tokens (not accumulated growth) for this check
+    (when (>= actual-prompt-tokens (matisse--warning-threshold))
+      (matisse--suggest-compaction))
+
+    ;; Update mode line to show current conversation size
+    (matisse--update-mode-line)))
 
 (defun matisse--suggest-compaction ()
   "Suggest compaction or inform about upcoming auto-compact."
-  (let* ((display-k (/ matisse--tokens-since-compact 1000))
+  (let* ((prompt-k (/ matisse--actual-prompt-tokens 1000))
+         (context-k (/ matisse-context-window 1000))
          (threshold-k (/ (matisse--auto-compact-threshold) 1000)))
     (when matisse--shell-context
       (funcall (plist-get matisse--shell-context :write-output)
                (if matisse-auto-compact-enabled
-                   (format "\n⚠️  Conversation at %dk tokens (auto-compact at %dk threshold)...\n"
-                          display-k threshold-k)
-                 (format "\n⚠️  Conversation at %dk tokens. Consider /compact or enable auto-compact.\n"
-                        display-k))))
+                   (format "\n⚠️  Conversation at %dk tokens (%dk context limit, auto-compact at %dk)...\n"
+                          prompt-k context-k threshold-k)
+                 (format "\n⚠️  Conversation at %dk tokens (%dk limit). Consider /compact or enable auto-compact.\n"
+                        prompt-k context-k))))
     (message (if matisse-auto-compact-enabled
                  (format "Conversation at %dk tokens (auto-compact at %dk threshold)"
-                        display-k threshold-k)
-               (format "Conversation is getting long. Consider /compact or enable auto-compact")))))
+                        prompt-k threshold-k)
+               (format "Conversation at %dk tokens. Consider /compact or enable auto-compact"
+                      prompt-k)))))
 
 (defun matisse--reset-token-count ()
   "Reset the tokens-since-compact counter and cache token tracking."
@@ -2845,9 +2845,9 @@ Returns nil if log file cannot be found or parsed."
   (condition-case err
       (let* ((claude-dir (expand-file-name "~/.claude/projects"))
              (log-file nil)
-             (tokens-from-compactions 0)
              (tokens-after-last-compact 0)
-             (last-compact-line 0))
+             (last-compact-line 0)
+             (latest-prompt-size 0))
 
         ;; Find the log file by searching all project directories
         (when (file-directory-p claude-dir)
@@ -2880,46 +2880,41 @@ Returns nil if log file cannot be found or parsed."
                           ;; Check for compact_boundary messages
                           (when (and (equal type "system")
                                     (equal (alist-get 'subtype json-obj) "compact_boundary"))
-                            (let* ((compact-metadata (alist-get 'compactMetadata json-obj))
-                                   (pre-tokens (when compact-metadata
-                                               (alist-get 'preTokens compact-metadata))))
-                              (when pre-tokens
-                                (setq tokens-from-compactions (+ tokens-from-compactions pre-tokens))
-                                (setq last-compact-line line-number)
-                                (setq tokens-after-last-compact 0)
-                                (matisse--debug-log "Found compaction at line %d: %d tokens"
-                                                   line-number pre-tokens))))
+                            (setq last-compact-line line-number)
+                            (setq tokens-after-last-compact 0)
+                            (matisse--debug-log "Found compaction at line %d" line-number))
 
-                          ;; Check for result messages (only count those after last compact)
+                          ;; Check for assistant messages (only count those after last compact)
                           (when (and (equal type "assistant")
                                     (> line-number last-compact-line))
                             (let* ((message (alist-get 'message json-obj))
                                    (usage (when message (alist-get 'usage message)))
                                    (input-tokens (when usage (alist-get 'input_tokens usage)))
                                    (output-tokens (when usage (alist-get 'output_tokens usage)))
-                                   (cache-creation (when usage (alist-get 'cache_creation_input_tokens usage))))
+                                   (cache-creation (when usage (alist-get 'cache_creation_input_tokens usage)))
+                                   (cache-read (when usage (alist-get 'cache_read_input_tokens usage))))
                               (when output-tokens
-                                ;; NEW tokens only - match matisse--track-tokens logic
-                                ;; input_tokens = fresh input (NOT including cache)
-                                ;; cache_creation = new cached content
-                                ;; cache_read = reused cached content (DON'T count)
-                                ;; output_tokens = assistant response
-                                (let ((new-tokens (+ (or input-tokens 0)
-                                                    (or cache-creation 0)
-                                                    output-tokens)))
-                                  (setq tokens-after-last-compact
-                                       (+ tokens-after-last-compact new-tokens)))))))
+                                ;; Track conversation growth (output only)
+                                (setq tokens-after-last-compact
+                                     (+ tokens-after-last-compact output-tokens))
+                                ;; Track latest prompt size for context window awareness
+                                (setq latest-prompt-size
+                                     (+ (or input-tokens 0)
+                                        (or cache-creation 0)
+                                        (or cache-read 0)))))))
 
                       (error
                        (matisse--debug-log "Error parsing line %d: %s" line-number
                                          (error-message-string parse-err))))))
                 (forward-line 1))))
 
-          ;; Return total tokens
-          (let ((total-tokens (+ tokens-from-compactions tokens-after-last-compact)))
-            (matisse--debug-log "Calculated initial tokens for session %s: %d (compactions: %d, after last compact: %d)"
-                               session-id total-tokens tokens-from-compactions tokens-after-last-compact)
-            total-tokens)))
+          ;; Return conversation growth since compact
+          ;; Also set the actual prompt size for proper context window tracking
+          (when (> latest-prompt-size 0)
+            (setq matisse--actual-prompt-tokens latest-prompt-size))
+          (matisse--debug-log "Calculated initial tokens for session %s: %d growth (latest prompt: %d)"
+                             session-id tokens-after-last-compact latest-prompt-size)
+          tokens-after-last-compact))
 
     (error
      (matisse--debug-log "Error calculating initial tokens: %s" (error-message-string err))
@@ -2949,23 +2944,25 @@ for threshold checks.  Returns estimated token count as integer."
 
 (defun matisse--format-token-status ()
   "Format token usage for mode line display."
-  (when (and matisse-show-token-usage (> matisse--tokens-since-compact 0))
-    (let* ((tokens-k (/ matisse--tokens-since-compact 1000))
-           (threshold (matisse--auto-compact-threshold))
-           (percentage (if (> threshold 0)
-                           (* 100.0 (/ (float matisse--tokens-since-compact)
-                                      threshold))
+  (when matisse-show-token-usage
+    (let* ((prompt-k (/ matisse--actual-prompt-tokens 1000))
+           (context-window matisse-context-window)
+           ;; Calculate percentage based on ACTUAL prompt size vs context window
+           (percentage (if (> context-window 0)
+                           (* 100.0 (/ (float matisse--actual-prompt-tokens)
+                                      context-window))
                          0))
-           ;; Warning based on percentage toward auto-compact threshold
+           ;; Warning based on percentage toward context window limit
            (show-warning (>= percentage 70))
            (face (cond
                   ((>= percentage 90) '(:inherit error :weight bold))
                   ((>= percentage 70) 'warning)
                   ((>= percentage 50) 'warning)
                   (t 'shadow)))
+           ;; Show just the prompt size (what Claude sees)
            (display-text (format "%s[%dk]"
                                 (if show-warning "⚠️" "")
-                                tokens-k)))
+                                prompt-k)))
       (propertize display-text 'face face))))
 
 ;;;; JSON Protocol
