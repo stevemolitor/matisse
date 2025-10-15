@@ -2900,10 +2900,19 @@ Returns nil if log file cannot be found or parsed."
                             (let* ((message (alist-get 'message json-obj))
                                    (usage (when message (alist-get 'usage message)))
                                    (input-tokens (when usage (alist-get 'input_tokens usage)))
-                                   (output-tokens (when usage (alist-get 'output_tokens usage))))
-                              (when (and input-tokens output-tokens)
-                                (setq tokens-after-last-compact
-                                     (+ tokens-after-last-compact input-tokens output-tokens))))))
+                                   (output-tokens (when usage (alist-get 'output_tokens usage)))
+                                   (cache-creation (when usage (alist-get 'cache_creation_input_tokens usage))))
+                              (when output-tokens
+                                ;; NEW tokens only - match matisse--track-tokens logic
+                                ;; input_tokens = fresh input (NOT including cache)
+                                ;; cache_creation = new cached content
+                                ;; cache_read = reused cached content (DON'T count)
+                                ;; output_tokens = assistant response
+                                (let ((new-tokens (+ (or input-tokens 0)
+                                                    (or cache-creation 0)
+                                                    output-tokens)))
+                                  (setq tokens-after-last-compact
+                                       (+ tokens-after-last-compact new-tokens)))))))
 
                       (error
                        (matisse--debug-log "Error parsing line %d: %s" line-number
