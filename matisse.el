@@ -2811,9 +2811,8 @@ JSON-OBJ is the result message containing usage data."
                           (or cache-read 0)
                           matisse--tokens-since-compact))
 
-    ;; Check if ACTUAL prompt size is approaching context window limit
-    ;; Use actual-prompt-tokens (not accumulated growth) for this check
-    (when (>= actual-prompt-tokens (matisse--warning-threshold))
+    ;; Check if conversation growth is approaching auto-compact threshold
+    (when (>= matisse--tokens-since-compact (matisse--warning-threshold))
       (matisse--suggest-compaction))
 
     ;; Update mode line to show current conversation size
@@ -2821,21 +2820,20 @@ JSON-OBJ is the result message containing usage data."
 
 (defun matisse--suggest-compaction ()
   "Suggest compaction or inform about upcoming auto-compact."
-  (let* ((prompt-k (/ matisse--actual-prompt-tokens 1000))
-         (context-k (/ matisse-context-window 1000))
+  (let* ((conversation-k (/ matisse--tokens-since-compact 1000))
          (threshold-k (/ (matisse--auto-compact-threshold) 1000)))
     (when matisse--shell-context
       (funcall (plist-get matisse--shell-context :write-output)
                (if matisse-auto-compact-enabled
-                   (format "\n⚠️  Conversation at %dk tokens (%dk context limit, auto-compact at %dk)...\n"
-                          prompt-k context-k threshold-k)
-                 (format "\n⚠️  Conversation at %dk tokens (%dk limit). Consider /compact or enable auto-compact.\n"
-                        prompt-k context-k))))
+                   (format "\n⚠️  Conversation at %dk tokens (auto-compact at %dk)...\n"
+                          conversation-k threshold-k)
+                 (format "\n⚠️  Conversation at %dk tokens (%dk threshold). Consider /compact or enable auto-compact.\n"
+                        conversation-k threshold-k))))
     (message (if matisse-auto-compact-enabled
                  (format "Conversation at %dk tokens (auto-compact at %dk threshold)"
-                        prompt-k threshold-k)
+                        conversation-k threshold-k)
                (format "Conversation at %dk tokens. Consider /compact or enable auto-compact"
-                      prompt-k)))))
+                      conversation-k)))))
 
 (defun matisse--reset-token-count ()
   "Reset the tokens-since-compact counter and cache token tracking."
@@ -2953,24 +2951,24 @@ for threshold checks.  Returns estimated token count as integer."
 (defun matisse--format-token-status ()
   "Format token usage for mode line display."
   (when matisse-show-token-usage
-    (let* ((prompt-k (/ matisse--actual-prompt-tokens 1000))
-           (context-window matisse-context-window)
-           ;; Calculate percentage based on ACTUAL prompt size vs context window
-           (percentage (if (> context-window 0)
-                           (* 100.0 (/ (float matisse--actual-prompt-tokens)
-                                      context-window))
+    (let* ((conversation-k (/ matisse--tokens-since-compact 1000))
+           (threshold (matisse--auto-compact-threshold))
+           ;; Calculate percentage based on conversation growth vs auto-compact threshold
+           (percentage (if (> threshold 0)
+                           (* 100.0 (/ (float matisse--tokens-since-compact)
+                                      threshold))
                          0))
-           ;; Warning based on percentage toward context window limit
+           ;; Warning based on percentage toward auto-compact threshold
            (show-warning (>= percentage 70))
            (face (cond
                   ((>= percentage 90) '(:inherit error :weight bold))
                   ((>= percentage 70) 'warning)
                   ((>= percentage 50) 'warning)
                   (t 'shadow)))
-           ;; Show just the prompt size (what Claude sees)
+           ;; Show conversation growth (matches auto-compact logic)
            (display-text (format "%s[%dk]"
                                 (if show-warning "⚠️" "")
-                                prompt-k)))
+                                conversation-k)))
       (propertize display-text 'face face))))
 
 ;;;; JSON Protocol
@@ -5142,7 +5140,7 @@ Works globally - finds the appropriate matisse buffer if not already in one."
                                       matisse--cache-creation-tokens
                                       matisse--cache-read-tokens)
                             "")))
-          (message "Tokens: %d conversation, ~%dk actual prompt%s%s"
+          (message "Tokens: %d conversation, ~%dk last prompt%s%s"
                    matisse--tokens-since-compact
                    prompt-k
                    cache-info
