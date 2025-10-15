@@ -6341,7 +6341,8 @@ end of buffer."
   ;; Check if current line starts with the prompt
   (if (looking-at matisse--shell-prompt-regex)
       ;; Skip past the prompt and space
-      (goto-char (+ (point) 2))
+      ;; Use (1+ (length ...)) to handle emoji prompts which may be longer than 1 char
+      (goto-char (+ (point) (1+ (length matisse--shell-prompt))))
     ;; Already at beginning of line (no prompt on this line)
     ))
 
