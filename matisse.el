@@ -1055,6 +1055,7 @@ This avoids expensive TreeSitter recompilation on every code block.")
     ("/context" . "Show current context information")
     ("/cost" . "Display token usage and cost information")
     ("/init" . "Initialize a new CLAUDE.md file")
+    ("/matisse:context" . "Show detailed context breakdown (matisse-native)")
     ("/output-style:new" . "Create a custom output style")
     ("/pr-comments" . "Get comments from a GitHub pull request")
     ("/release-notes" . "View release notes")
@@ -2971,6 +2972,132 @@ for threshold checks.  Returns estimated token count as integer."
                                 conversation-k)))
       (propertize display-text 'face face))))
 
+;;;; Context Breakdown (JSONL Parsing)
+(defun matisse--get-session-jsonl-file ()
+  "Get the path to the current session's JSONL transcript file.
+Returns nil if session ID is not set or file doesn't exist."
+  (when matisse--conversation-id
+    (let ((file (matisse--get-session-file matisse--conversation-id)))
+      (when (file-exists-p file)
+        file))))
+
+(defun matisse--parse-transcript-for-context ()
+  "Parse the current session's JSONL transcript to calculate context breakdown.
+Returns an alist with keys: model, total-tokens, system-prompt-tokens,
+system-tools-tokens, memory-files-tokens, messages-tokens, reserved-tokens,
+free-space-tokens, context-window, percentage-used."
+  (let ((file (matisse--get-session-jsonl-file)))
+    (if (not file)
+        (progn
+          (message "No session transcript file found")
+          nil)
+      (condition-case err
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-min))
+
+            ;; Variables to track token counts
+            (let ((total-input-tokens 0)
+                  (total-output-tokens 0)
+                  (model-name (or matisse--current-model "unknown"))
+                  (context-window matisse-context-window))
+
+              ;; Parse each line
+              (while (not (eobp))
+                (let* ((line (buffer-substring-no-properties
+                             (line-beginning-position)
+                             (line-end-position)))
+                       (json-obj (when (not (string-empty-p line))
+                                  (ignore-errors (json-parse-string line :object-type 'alist)))))
+
+                  (when json-obj
+                    (let ((type (alist-get 'type json-obj)))
+
+                      ;; Extract model from init message
+                      (when (equal type "system")
+                        (let ((subtype (alist-get 'subtype json-obj)))
+                          (when (equal subtype "init")
+                            (setq model-name (or (alist-get 'model json-obj) model-name)))))
+
+                      ;; Extract token usage from assistant messages
+                      (when (equal type "assistant")
+                        (let* ((message (alist-get 'message json-obj))
+                               (usage (when message (alist-get 'usage message)))
+                               (input-tokens (when usage (alist-get 'input_tokens usage)))
+                               (output-tokens (when usage (alist-get 'output_tokens usage))))
+                          (when input-tokens
+                            (setq total-input-tokens input-tokens))
+                          (when output-tokens
+                            (setq total-output-tokens (+ total-output-tokens output-tokens)))))))
+
+                  (forward-line 1)))
+
+              ;; Estimate breakdown (rough approximation since we don't have exact numbers)
+              ;; System prompt + tools is typically 5-10% of total input
+              ;; We'll use the actual input tokens as the basis
+              (let* ((estimated-system-overhead (max 4000 (round (* total-input-tokens 0.05))))
+                     (estimated-tools (round (* estimated-system-overhead 0.55)))
+                     (estimated-prompt (- estimated-system-overhead estimated-tools))
+                     (total-used (+ total-input-tokens total-output-tokens))
+                     (reserved matisse-auto-compact-reserve)
+                     (free-space (- context-window total-used reserved))
+                     (percentage (if (> context-window 0)
+                                    (* 100.0 (/ (float total-used) context-window))
+                                  0)))
+
+                ;; Return the breakdown
+                `((model . ,model-name)
+                  (total-tokens . ,total-used)
+                  (system-prompt-tokens . ,estimated-prompt)
+                  (system-tools-tokens . ,estimated-tools)
+                  (memory-files-tokens . 0) ; Not tracked separately
+                  (messages-tokens . ,total-output-tokens)
+                  (reserved-tokens . ,reserved)
+                  (free-space-tokens . ,free-space)
+                  (context-window . ,context-window)
+                  (percentage-used . ,percentage)))))
+        (error
+         (message "Error parsing transcript: %s" (error-message-string err))
+         nil)))))
+
+(defun matisse--format-context-display (context-data)
+  "Format CONTEXT-DATA as a human-readable string for display.
+CONTEXT-DATA should be an alist from `matisse--parse-transcript-for-context'."
+  (if (not context-data)
+      "Unable to parse context information"
+    (let* ((model (alist-get 'model context-data))
+           (total (alist-get 'total-tokens context-data))
+           (window (alist-get 'context-window context-data))
+           (percent (alist-get 'percentage-used context-data))
+           (sys-prompt (alist-get 'system-prompt-tokens context-data))
+           (sys-tools (alist-get 'system-tools-tokens context-data))
+           (memory (alist-get 'memory-files-tokens context-data))
+           (messages (alist-get 'messages-tokens context-data))
+           (reserved (alist-get 'reserved-tokens context-data))
+           (free (alist-get 'free-space-tokens context-data))
+           (icon (matisse--get-icon :info))
+
+           ;; Calculate percentages for breakdown
+           (sys-prompt-pct (if (> total 0) (* 100.0 (/ (float sys-prompt) total)) 0))
+           (sys-tools-pct (if (> total 0) (* 100.0 (/ (float sys-tools) total)) 0))
+           (memory-pct (if (> total 0) (* 100.0 (/ (float memory) total)) 0))
+           (messages-pct (if (> total 0) (* 100.0 (/ (float messages) total)) 0))
+           (free-pct (if (> window 0) (* 100.0 (/ (float free) window)) 0)))
+
+      ;; Format with right-aligned columns (width 6 for token counts, width 4 for percentages)
+      (format "%sContext breakdown:\n\n%s • %dk/%dk tokens (%.0f%%)\n\n- System prompt:  %6dk tokens (%3.0f%%)\n- System tools:   %6dk tokens (%3.0f%%)\n- Memory files:   %6dk tokens (%3.0f%%)\n- Messages:       %6dk tokens (%3.0f%%)\n- Reserved tokens:%6dk\n- Free space:     %6dk tokens (%3.0f%%)"
+              (string-trim-right icon)
+              (if (equal model "unknown")
+                  (or matisse--current-model "claude-sonnet-4-5-20250929")
+                  model)
+              (/ total 1000) (/ window 1000) percent
+              (/ sys-prompt 1000) sys-prompt-pct
+              (/ sys-tools 1000) sys-tools-pct
+              (/ memory 1000) memory-pct
+              (/ messages 1000) messages-pct
+              (/ reserved 1000)
+              (/ free 1000) free-pct))))
+
 ;;;; JSON Protocol
 ;; Buffer-local variable to store pending images
 
@@ -3146,6 +3273,10 @@ handled commands. Converts large arguments to temp files with @ references."
      ((equal command "/clear")
       nil)
 
+     ;; Handle /matisse:context command locally (return nil to prevent sending to Claude)
+     ((equal command "/matisse:context")
+      nil)
+
      ;; Handle help commands locally (return nil to prevent sending to Claude)
      ((or (equal command "/help")
           (and args (assoc "help" args)))
@@ -3186,9 +3317,23 @@ Large non-slash text is converted to temp file references."
     ;; Handle locally processed commands
     (if (eq final-text 'locally-handled)
         (progn
-          ;; Handle the command locally (e.g., show help)
-          (matisse--handle-local-command text)
-          ;; Return nil to prevent sending message to Claude
+          ;; Run local command asynchronously to avoid blocking
+          (let ((current-buffer (current-buffer)))
+            (run-with-timer 0.01 nil
+                           (lambda ()
+                             (when (buffer-live-p current-buffer)
+                               (with-current-buffer current-buffer
+                                 ;; Handle the command locally
+                                 (matisse--handle-local-command text)
+                                 ;; Clear ALL state that might block input
+                                 (setq matisse--waiting-for-response nil
+                                       matisse--pending-message nil)
+                                 (matisse--stop-spinner)
+                                 (matisse--update-mode-line)
+                                 ;; Force redisplay to ensure mode-line updates immediately
+                                 (force-mode-line-update t)
+                                 (redisplay t))))))
+          ;; Return nil immediately to prevent sending message to Claude
           nil)
       ;; Normal processing for non-local commands
       (progn
@@ -3223,6 +3368,32 @@ TEXT is the raw slash command text to process."
      ((equal command "/clear")
       (matisse-clear))
 
+     ;; Handle /matisse:context command
+     ((equal command "/matisse:context")
+      (let ((context-data (matisse--parse-transcript-for-context)))
+        (if context-data
+            (let ((formatted (matisse--format-context-display context-data))
+                  (inhibit-read-only t))
+              ;; Write directly to the current buffer
+              (goto-char (point-max))
+              (unless (bolp) (insert "\n"))
+              (insert formatted)
+              (insert "\n")
+              (matisse--insert-prompt)
+              ;; Move cursor to the new prompt and scroll
+              (goto-char (point-max))
+              (recenter -3))
+          ;; On error, just insert error message in buffer
+          (let ((inhibit-read-only t))
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n"))
+            (insert "Unable to parse context information")
+            (insert "\n")
+            (matisse--insert-prompt)
+            ;; Move cursor to the new prompt and scroll
+            (goto-char (point-max))
+            (recenter -3)))))
+
      ;; Handle /help command
      ((equal command "/help")
       (matisse--show-help))
@@ -3251,7 +3422,7 @@ TEXT is the raw slash command text to process."
 (defun matisse--get-available-commands ()
   "Get list of available slash commands.
 Returns dynamically discovered commands merged with local commands."
-  (let ((local-commands '("/clear" "/help"))
+  (let ((local-commands '("/clear" "/help" "/matisse:context"))
         (discovered (if matisse--available-commands
                        (append matisse--available-commands nil)
                      (mapcar #'car matisse--slash-commands))))
