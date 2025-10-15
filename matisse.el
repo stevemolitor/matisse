@@ -371,6 +371,14 @@ indicators while keeping the animated emoji in the modeline."
   "Nerd Font icon settings for progress indicators."
   :group 'matisse-icons)
 
+
+(defcustom matisse-nerd-icons-double-width t
+  "Whether nerd font icons use double-width glyphs.
+When non-nil, use 2 spaces after the prompt character to account for
+double-width display. Set to nil if using a non-proportional nerd font
+where icons are single-width."
+  :type 'boolean
+  :group 'matisse-nerd-icons)
 (defcustom matisse-nerd-icon-read ""
   "Nerd Font icon for Read tool progress indicator."
   :type 'string
@@ -5342,9 +5350,14 @@ Returns early if queue is paused or a message is already processing."
 
 (defun matisse--update-shell-prompt ()
   "Update shell prompt variables based on current icon mode."
-  (let ((char (matisse--get-icon :prompt)))
+  (let* ((char (matisse--get-icon :prompt))
+         ;; Use 2 spaces for double-wide nerd-icons, 1 space otherwise
+         (spaces (if (and (eq matisse-icons-mode 'nerd-icons)
+                          matisse-nerd-icons-double-width)
+                     "  "
+                   " ")))
     (setq matisse--shell-prompt char
-          matisse--shell-prompt-regex (concat "^" (regexp-quote char)))))
+          matisse--shell-prompt-regex (concat "^" (regexp-quote char) spaces))))
 
 ;; Initialize prompt variables globally as fallback
 (matisse--update-shell-prompt)
@@ -6276,7 +6289,7 @@ end of buffer."
    (save-excursion
      (goto-char (point-max))
      (when (re-search-backward matisse--shell-prompt-regex nil t)
-       (let ((start (+ (point) (length matisse--shell-prompt))) ; After prompt
+       (let ((start (match-end 0)) ; After prompt and space
              (end (point-max)))
          (when (>= end start)
            (cons start end)))))
@@ -6311,8 +6324,13 @@ end of buffer."
               ;; Make prompt character read-only
               (put-text-property prompt-start prompt-end 'read-only t)
               (put-text-property prompt-start prompt-end 'rear-nonsticky '(read-only face))))
-          ;; Insert space after prompt (not read-only, no special face)
-          (insert " ")
+          ;; Insert space(s) after prompt (not read-only, no special face)
+          ;; Use 2 spaces for double-wide nerd-icons, 1 space otherwise
+          (let ((spaces (if (and (eq matisse-icons-mode 'nerd-icons)
+                                 matisse-nerd-icons-double-width)
+                            "  "
+                          " ")))
+            (insert spaces))
           (matisse--debug-log "Prompt inserted, now at point %d" (point)))
 
         ;; Position cursor for input
@@ -6332,12 +6350,10 @@ end of buffer."
   (interactive)
   (beginning-of-line)
   ;; Check if current line starts with the prompt
-  (if (looking-at matisse--shell-prompt-regex)
-      ;; Skip past the prompt and space
-      ;; Use (1+ (length ...)) to handle emoji prompts which may be longer than 1 char
-      (goto-char (+ (point) (1+ (length matisse--shell-prompt))))
-    ;; Already at beginning of line (no prompt on this line)
-    ))
+  (when (looking-at matisse--shell-prompt-regex)
+    ;; Skip past the prompt and space(s) using match end position
+    ;; This handles multi-byte chars (emoji, nerd-icons) correctly
+    (goto-char (match-end 0))))
 
 (defun matisse--clear-current-input ()
   "Clear text after prompt on current line."
@@ -7465,3 +7481,4 @@ Provides a clean interface for Claude interactions with visual feedback."
 
 (provide 'matisse)
 ;;; matisse.el ends here
+
