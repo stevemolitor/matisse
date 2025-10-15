@@ -2796,9 +2796,9 @@ JSON-OBJ is the result message containing usage data."
       (setq matisse--total-tokens-used (+ matisse--total-tokens-used new-tokens-this-turn))
       (setq matisse--tokens-since-compact (+ matisse--tokens-since-compact new-tokens-this-turn))
 
-      ;; Check if PROMPT SIZE is approaching context window limit
-      (when (>= actual-prompt-tokens (matisse--warning-threshold))
-        (matisse--suggest-compaction actual-prompt-tokens))
+      ;; Check if conversation size is approaching context window limit
+      (when (>= matisse--tokens-since-compact (matisse--warning-threshold))
+        (matisse--suggest-compaction))
 
       (matisse--debug-log "Tokens - New: %d (input: %d [%d fresh + %d cache create], output: %d) | Prompt size: %d (+%d cache read) | Accumulated: %d"
                           new-tokens-this-turn
@@ -2813,25 +2813,21 @@ JSON-OBJ is the result message containing usage data."
       ;; Update mode line to show new token count
       (matisse--update-mode-line))))
 
-(defun matisse--suggest-compaction (&optional prompt-size)
-  "Suggest compaction or inform about upcoming auto-compact.
-PROMPT-SIZE is the actual prompt size that triggered the warning (optional)."
-  (let* ((display-tokens (or prompt-size matisse--tokens-since-compact))
-         (display-k (/ display-tokens 1000))
-         (threshold-k (/ (matisse--auto-compact-threshold) 1000))
-         (metric-label (if prompt-size "Prompt size" "Context")))
+(defun matisse--suggest-compaction ()
+  "Suggest compaction or inform about upcoming auto-compact."
+  (let* ((display-k (/ matisse--tokens-since-compact 1000))
+         (threshold-k (/ (matisse--auto-compact-threshold) 1000)))
     (when matisse--shell-context
       (funcall (plist-get matisse--shell-context :write-output)
                (if matisse-auto-compact-enabled
-                   (format "\n⚠️  %s at %dk tokens (auto-compact at %dk threshold)...\n"
-                          metric-label display-k threshold-k)
-                 (format "\n⚠️  %s at %dk tokens. Consider /compact or enable auto-compact.\n"
-                        metric-label display-k))))
+                   (format "\n⚠️  Conversation at %dk tokens (auto-compact at %dk threshold)...\n"
+                          display-k threshold-k)
+                 (format "\n⚠️  Conversation at %dk tokens. Consider /compact or enable auto-compact.\n"
+                        display-k))))
     (message (if matisse-auto-compact-enabled
-                 (format "%s at %dk tokens (auto-compact at %dk threshold)"
-                        metric-label display-k threshold-k)
-               (format "%s is getting long. Consider /compact or enable auto-compact"
-                      metric-label)))))
+                 (format "Conversation at %dk tokens (auto-compact at %dk threshold)"
+                        display-k threshold-k)
+               (format "Conversation is getting long. Consider /compact or enable auto-compact")))))
 
 (defun matisse--reset-token-count ()
   "Reset the tokens-since-compact counter and cache token tracking."
