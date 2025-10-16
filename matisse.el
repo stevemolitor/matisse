@@ -2982,10 +2982,8 @@ Returns nil if session ID is not set or file doesn't exist."
         file))))
 
 (defun matisse--parse-transcript-for-context ()
-  "Parse the current session's JSONL transcript to calculate context breakdown.
-Returns an alist with keys: model, total-tokens, system-prompt-tokens,
-system-tools-tokens, memory-files-tokens, messages-tokens, reserved-tokens,
-free-space-tokens, context-window, percentage-used."
+  "Parse the session JSONL transcript for detailed context breakdown.
+Returns alist with token breakdowns: user input, Claude output, agents, etc."
   (let ((file (matisse--get-session-jsonl-file)))
     (if (not file)
         (progn
@@ -2997,10 +2995,13 @@ free-space-tokens, context-window, percentage-used."
             (goto-char (point-min))
 
             ;; Variables to track token counts
-            (let ((total-input-tokens 0)
-                  (total-output-tokens 0)
+            (let ((user-input-tokens 0)
+                  (claude-output-tokens 0)
+                  (custom-agent-tokens 0)
+                  (total-input-tokens 0)
                   (model-name (or matisse--current-model "unknown"))
-                  (context-window matisse-context-window))
+                  (context-window matisse-context-window)
+                  (agents-definition nil))
 
               ;; Parse each line
               (while (not (eobp))
@@ -3013,45 +3014,71 @@ free-space-tokens, context-window, percentage-used."
                   (when json-obj
                     (let ((type (alist-get 'type json-obj)))
 
-                      ;; Extract model from init message
+                      ;; Extract model and agents from init message
                       (when (equal type "system")
                         (let ((subtype (alist-get 'subtype json-obj)))
                           (when (equal subtype "init")
-                            (setq model-name (or (alist-get 'model json-obj) model-name)))))
+                            (setq model-name (or (alist-get 'model json-obj) model-name))
+                            (setq agents-definition (alist-get 'agents json-obj)))))
 
-                      ;; Extract token usage from assistant messages
+                      ;; Count user message tokens
+                      (when (equal type "user")
+                        (let* ((message (alist-get 'message json-obj))
+                               (content (when message (alist-get 'content message))))
+                          (when (stringp content)
+                            (setq user-input-tokens
+                                  (+ user-input-tokens (matisse--estimate-tokens content))))
+                          (when (vectorp content)
+                            (dotimes (i (length content))
+                              (let* ((item (aref content i))
+                                     (text (alist-get 'text item)))
+                                (when text
+                                  (setq user-input-tokens
+                                        (+ user-input-tokens (matisse--estimate-tokens text)))))))))
+
+                      ;; Count assistant message tokens
                       (when (equal type "assistant")
                         (let* ((message (alist-get 'message json-obj))
                                (usage (when message (alist-get 'usage message)))
                                (input-tokens (when usage (alist-get 'input_tokens usage)))
                                (output-tokens (when usage (alist-get 'output_tokens usage))))
+                          ;; Track latest input tokens (includes system overhead)
                           (when input-tokens
                             (setq total-input-tokens input-tokens))
+                          ;; Accumulate output tokens
                           (when output-tokens
-                            (setq total-output-tokens (+ total-output-tokens output-tokens)))))))
+                            (setq claude-output-tokens (+ claude-output-tokens output-tokens)))))))
 
                   (forward-line 1)))
 
-              ;; Estimate breakdown (rough approximation since we don't have exact numbers)
-              ;; System prompt + tools is typically 5-10% of total input
-              ;; We'll use the actual input tokens as the basis
+              ;; Calculate custom agent tokens if agents are defined
+              (when agents-definition
+                (setq custom-agent-tokens
+                      (matisse--estimate-tokens (json-encode agents-definition))))
+
+              ;; Calculate breakdown
               (let* ((estimated-system-overhead (max 4000 (round (* total-input-tokens 0.05))))
                      (estimated-tools (round (* estimated-system-overhead 0.55)))
                      (estimated-prompt (- estimated-system-overhead estimated-tools))
-                     (total-used (+ total-input-tokens total-output-tokens))
+                     ;; Messages = user input + Claude output
+                     (messages-total (+ user-input-tokens claude-output-tokens))
+                     (total-used (+ total-input-tokens claude-output-tokens))
                      (reserved matisse-auto-compact-reserve)
                      (free-space (- context-window total-used reserved))
                      (percentage (if (> context-window 0)
                                     (* 100.0 (/ (float total-used) context-window))
                                   0)))
 
-                ;; Return the breakdown
+                ;; Return detailed breakdown
                 `((model . ,model-name)
                   (total-tokens . ,total-used)
                   (system-prompt-tokens . ,estimated-prompt)
                   (system-tools-tokens . ,estimated-tools)
                   (memory-files-tokens . 0) ; Not tracked separately
-                  (messages-tokens . ,total-output-tokens)
+                  (messages-tokens . ,messages-total)
+                  (custom-agent-tokens . ,custom-agent-tokens)
+                  (user-input-tokens . ,user-input-tokens)
+                  (claude-output-tokens . ,claude-output-tokens)
                   (reserved-tokens . ,reserved)
                   (free-space-tokens . ,free-space)
                   (context-window . ,context-window)
@@ -3073,6 +3100,9 @@ CONTEXT-DATA should be an alist from `matisse--parse-transcript-for-context'."
            (sys-tools (alist-get 'system-tools-tokens context-data))
            (memory (alist-get 'memory-files-tokens context-data))
            (messages (alist-get 'messages-tokens context-data))
+           (custom-agents (alist-get 'custom-agent-tokens context-data))
+           (user-input (alist-get 'user-input-tokens context-data))
+           (claude-output (alist-get 'claude-output-tokens context-data))
            (reserved (alist-get 'reserved-tokens context-data))
            (free (alist-get 'free-space-tokens context-data))
            (icon (matisse--get-icon :info))
@@ -3082,21 +3112,30 @@ CONTEXT-DATA should be an alist from `matisse--parse-transcript-for-context'."
            (sys-tools-pct (if (> total 0) (* 100.0 (/ (float sys-tools) total)) 0))
            (memory-pct (if (> total 0) (* 100.0 (/ (float memory) total)) 0))
            (messages-pct (if (> total 0) (* 100.0 (/ (float messages) total)) 0))
+           (custom-agents-pct (if (> messages 0) (* 100.0 (/ (float custom-agents) messages)) 0))
+           (user-input-pct (if (> messages 0) (* 100.0 (/ (float user-input) messages)) 0))
+           (claude-output-pct (if (> messages 0) (* 100.0 (/ (float claude-output) messages)) 0))
            (free-pct (if (> window 0) (* 100.0 (/ (float free) window)) 0)))
 
-      ;; Format with right-aligned columns (width 6 for token counts, width 4 for percentages)
-      (format "%sContext breakdown:\n\n%s • %dk/%dk tokens (%.0f%%)\n\n- System prompt:  %6dk tokens (%3.0f%%)\n- System tools:   %6dk tokens (%3.0f%%)\n- Memory files:   %6dk tokens (%3.0f%%)\n- Messages:       %6dk tokens (%3.0f%%)\n- Reserved tokens:%6dk\n- Free space:     %6dk tokens (%3.0f%%)"
-              (string-trim-right icon)
-              (if (equal model "unknown")
-                  (or matisse--current-model "claude-sonnet-4-5-20250929")
-                  model)
-              (/ total 1000) (/ window 1000) percent
-              (/ sys-prompt 1000) sys-prompt-pct
-              (/ sys-tools 1000) sys-tools-pct
-              (/ memory 1000) memory-pct
-              (/ messages 1000) messages-pct
-              (/ reserved 1000)
-              (/ free 1000) free-pct))))
+      ;; Format with right-aligned columns and nested breakdown
+      (concat
+       (format "%sContext breakdown:\n\n%s • %dk/%dk tokens (%.0f%%)\n\n"
+               (string-trim-right icon)
+               (if (equal model "unknown")
+                   (or matisse--current-model "claude-sonnet-4-5-20250929")
+                 model)
+               (/ total 1000) (/ window 1000) percent)
+       (format "- System prompt:  %6dk tokens (%3.0f%%)\n" (/ sys-prompt 1000) sys-prompt-pct)
+       (format "- System tools:   %6dk tokens (%3.0f%%)\n" (/ sys-tools 1000) sys-tools-pct)
+       (format "- Memory files:   %6dk tokens (%3.0f%%)\n" (/ memory 1000) memory-pct)
+       (format "- Messages:       %6dk tokens (%3.0f%%)\n" (/ messages 1000) messages-pct)
+       ;; Nested breakdown for messages
+       (when (> custom-agents 0)
+         (format "  - Custom agents:%6dk tokens (%3.0f%%)\n" (/ custom-agents 1000) custom-agents-pct))
+       (format "  - User input:   %6dk tokens (%3.0f%%)\n" (/ user-input 1000) user-input-pct)
+       (format "  - Claude output:%6dk tokens (%3.0f%%)\n" (/ claude-output 1000) claude-output-pct)
+       (format "- Reserved tokens:%6dk\n" (/ reserved 1000))
+       (format "- Free space:     %6dk tokens (%3.0f%%)" (/ free 1000) free-pct)))))
 
 ;;;; JSON Protocol
 ;; Buffer-local variable to store pending images
@@ -3317,23 +3356,16 @@ Large non-slash text is converted to temp file references."
     ;; Handle locally processed commands
     (if (eq final-text 'locally-handled)
         (progn
-          ;; Run local command asynchronously to avoid blocking
-          (let ((current-buffer (current-buffer)))
-            (run-with-timer 0.01 nil
-                           (lambda ()
-                             (when (buffer-live-p current-buffer)
-                               (with-current-buffer current-buffer
-                                 ;; Handle the command locally
-                                 (matisse--handle-local-command text)
-                                 ;; Clear ALL state that might block input
-                                 (setq matisse--waiting-for-response nil
-                                       matisse--pending-message nil)
-                                 (matisse--stop-spinner)
-                                 (matisse--update-mode-line)
-                                 ;; Force redisplay to ensure mode-line updates immediately
-                                 (force-mode-line-update t)
-                                 (redisplay t))))))
-          ;; Return nil immediately to prevent sending message to Claude
+          ;; Handle synchronously and clear all state immediately
+          (matisse--handle-local-command text)
+          ;; Clear ALL state that might block input - do this synchronously
+          (setq matisse--waiting-for-response nil
+                matisse--pending-message nil
+                matisse--pending-slash-command nil)
+          (matisse--stop-spinner)
+          (matisse--update-mode-line)
+          (force-mode-line-update t)
+          ;; Return nil to prevent sending message to Claude
           nil)
       ;; Normal processing for non-local commands
       (progn
@@ -3370,6 +3402,7 @@ TEXT is the raw slash command text to process."
 
      ;; Handle /matisse:context command
      ((equal command "/matisse:context")
+      (matisse--debug-log "*** Handling /matisse:context command ***")
       (let ((context-data (matisse--parse-transcript-for-context)))
         (if context-data
             (let ((formatted (matisse--format-context-display context-data))
@@ -6636,6 +6669,17 @@ end of buffer."
          ((member (string-trim (downcase input)) matisse-exit-commands)
           (when (fboundp 'matisse-quit)
             (matisse-quit)))
+
+         ;; Check if this is a local slash command BEFORE adding prompt
+         ((and (matisse--is-slash-command-p input)
+               (let ((cmd (car (split-string (string-trim input) "\\s-+" t))))
+                 (member cmd '("/clear" "/help" "/matisse:context"))))
+          ;; Track buffer usage
+          (matisse--update-mru (current-buffer))
+          ;; Handle locally - these commands insert their own prompt
+          (matisse--handle-local-command input)
+          ;; Clear pending state
+          (setq matisse--pending-large-paste nil))
 
          ;; Normal message processing
          (t
