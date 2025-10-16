@@ -4825,11 +4825,11 @@ Returns a string like \\='@matisse.el:45\\=' or \\='@matisse.el:45-47\\='."
   (let ((mode (or matisse--current-permission-mode matisse-permission-mode)))
     (cond
      ((string= mode "plan")
-      (propertize "[PLAN]" 'face '(:inherit success :weight 'bold)))
+      (propertize "[PLAN]" 'face '(:inherit success :weight bold)))
      ((string= mode "acceptEdits")
-      (propertize "[ACCEPT]" 'face 'matisse-accept-mode-face :weight 'bold))
+      (propertize "[ACCEPT]" 'face '(:inherit matisse-accept-mode-face :weight bold)))
      ((string= mode "bypassPermissions")
-      (propertize "[BYPASS]" 'face '(:inherit error :weight :bold)))
+      (propertize "[BYPASS]" 'face '(:inherit error :weight bold)))
      ((string= mode "yolo")
       (propertize "[YOLO]" 'face '(:inherit warning :weight bold)))
      ((string= mode "default")
@@ -5898,7 +5898,10 @@ LANGUAGE: language string (e.g. \\='json\\=', \\='typescript\\=')"
                                 (actual-end (min orig-end body-end)))
                             (push (list actual-start actual-end face) faces-to-apply)))
 
-                        (goto-char next-change))))))
+                        ;; Move to next change, ensuring we don't get stuck at the end
+                        (if (>= next-change temp-end)
+                            (goto-char temp-end)  ;; Exit loop on next iteration
+                          (goto-char next-change)))))))
 
               ;; Apply overlays in the original buffer
               (with-current-buffer original-buffer
@@ -5906,10 +5909,14 @@ LANGUAGE: language string (e.g. \\='json\\=', \\='typescript\\=')"
                   (let ((start (nth 0 face-info))
                         (end (nth 1 face-info))
                         (face (nth 2 face-info)))
-                    (matisse--overlay-put
-                     (make-overlay start end)
-                     'evaporate t
-                     'face face)))))
+                    ;; Only apply overlay if positions are valid in the buffer
+                    (when (and (<= start (point-max))
+                              (<= end (point-max))
+                              (< start end))
+                      (matisse--overlay-put
+                       (make-overlay start end)
+                       'evaporate t
+                       'face face))))))
           (error
            (message "Error applying syntax highlighting for %s: %s" target-mode (error-message-string err))))))))
 
