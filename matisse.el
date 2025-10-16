@@ -192,6 +192,14 @@ A value of 1.0 uses the default text height, 1.2 makes icons 20% larger, etc."
   :type 'float
   :group 'matisse-icons)
 
+(defcustom matisse-modeline-icons-scale-factor 1.0
+  "Scale factor for mode-line icon height.
+This controls the relative size of icons in the mode line.
+A value of 1.0 uses the default text height, 1.2 makes icons 20% larger, etc.
+This setting is independent of `matisse-icons-scale-factor'."
+  :type 'float
+  :group 'matisse-icons)
+
 (defcustom matisse-icons-mode 'ascii
   "Mode for displaying progress indicator icons.
 Options:
@@ -2536,16 +2544,21 @@ Returns t if the buffer is empty or if we're looking at a newline."
             (= (char-after) ?\n)) ; ends with newline
     (error t)))  ; Default to true (add newline) if we can't determine
 
-(defun matisse--apply-icon-face-properties (icon-string &optional color-face)
+(defun matisse--apply-icon-face-properties (icon-string &optional color-face modeline-icon)
   "Apply face properties to ICON-STRING based on current settings.
 Returns the icon string with appropriate face properties applied.
-COLOR-FACE is an optional face to apply for coloring (used with nerd icons)."
+COLOR-FACE is an optional face to apply for coloring (used with nerd icons).
+MODELINE-ICON when non-nil indicates this is a mode-line icon, which uses
+`matisse-modeline-icons-scale-factor' instead of `matisse-icons-scale-factor'."
   (when (and icon-string (not (string-empty-p icon-string)))
-    (let ((styled-icon (copy-sequence icon-string))
-          (face-props `(:height ,matisse-icons-scale-factor)))
+    (let* ((styled-icon (copy-sequence icon-string))
+           (scale-factor (if modeline-icon
+                            matisse-modeline-icons-scale-factor
+                          matisse-icons-scale-factor))
+           (face-props `(:height ,scale-factor)))
       ;; If a color face is provided and we're using nerd icons, inherit from it
       (when (and color-face (eq matisse-icons-mode 'nerd-icons))
-        (setq face-props `(:height ,matisse-icons-scale-factor :inherit ,color-face)))
+        (setq face-props `(:height ,scale-factor :inherit ,color-face)))
       (put-text-property 0 (length styled-icon) 'font-lock-face face-props styled-icon)
       styled-icon)))
 
@@ -2631,7 +2644,9 @@ Icon types: :tool, :success, :performance, :command, :permission,
                             'emoji
                           matisse-icons-mode))
         ;; Prompt icons should not have trailing space
-        (add-space (not (eq icon-type :prompt))))
+        (add-space (not (eq icon-type :prompt)))
+        ;; Check if this is a modeline icon
+        (is-modeline (memq icon-type '(:modeline-default :modeline-permission :modeline-active))))
     (pcase effective-mode
       ('emoji
        (let ((icon (nth 0 icon-data)))
@@ -2643,8 +2658,8 @@ Icon types: :tool, :success, :performance, :command, :permission,
          (if (string-empty-p icon)
              ""
            (if add-space
-               (concat (matisse--apply-icon-face-properties icon) " ")
-             (matisse--apply-icon-face-properties icon)))))
+               (concat (matisse--apply-icon-face-properties icon nil is-modeline) " ")
+             (matisse--apply-icon-face-properties icon nil is-modeline)))))
       ('nerd-icons
        (let ((icon (nth 1 icon-data))
              (face (nth 2 icon-data)))
@@ -2658,8 +2673,8 @@ Icon types: :tool, :success, :performance, :command, :permission,
          (if (string-empty-p icon)
              ""
            (if add-space
-               (concat (matisse--apply-icon-face-properties icon face) " ")
-             (matisse--apply-icon-face-properties icon face)))))
+               (concat (matisse--apply-icon-face-properties icon face is-modeline) " ")
+             (matisse--apply-icon-face-properties icon face is-modeline)))))
       ('ascii
        (let ((text (nth 3 icon-data)))
          ;; For modeline-active in ascii mode, use spinner chars for animation
