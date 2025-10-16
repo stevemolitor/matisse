@@ -865,6 +865,16 @@ columns for better readability. Requires markdown-mode to be available."
   :type 'string
   :group 'matisse-keybindings)
 
+(defcustom matisse-key-history-isearch-backward "C-M-r"
+  "Key binding for interactive/incremental search backward through history."
+  :type 'string
+  :group 'matisse-keybindings)
+
+(defcustom matisse-key-history-isearch-forward "C-M-s"
+  "Key binding for interactive/incremental search forward through history."
+  :type 'string
+  :group 'matisse-keybindings)
+
 (defcustom matisse-key-history-complete "C-c C-r"
   "Key binding for selecting from history with completion."
   :type 'string
@@ -1264,6 +1274,24 @@ Cleared when user sends a new message.")
 (defvar-local matisse--current-input ""
   "Current input being typed before history navigation.")
 
+(defvar-local matisse--isearch-string ""
+  "Current search string for interactive history search.")
+
+(defvar-local matisse--isearch-original-input nil
+  "Input text saved before starting interactive search.")
+
+(defvar-local matisse--isearch-original-index nil
+  "History index before starting interactive search.")
+
+(defvar-local matisse--isearch-direction -1
+  "Search direction: -1 for backward, 1 for forward.")
+
+(defvar-local matisse--isearch-wrapped nil
+  "Non-nil if search has wrapped around to beginning/end of history.")
+
+(defvar-local matisse--isearch-failing nil
+  "Non-nil if current search string has no matches.")
+
 (defvar-local matisse--output-start-marker nil
   "Marker pointing to start of message history region.")
 
@@ -1537,10 +1565,12 @@ Returns a short text preview or the string `No preview available'."
 (defun matisse--replay-conversation-from-file (file)
   "Replay conversation from FILE into the current buffer.
 Returns \='user if last message was from user, \='assistant if from
-assistant, nil if no messages."
+assistant, nil if no messages.
+Populates `matisse--history' with user messages for history navigation."
   (let ((target-buffer (current-buffer))
         (message-count 0)
         (last-message-type nil)
+        (user-messages nil)  ; Collect user messages for history
         (matisse--skip-syntax-highlighting t)  ; Skip highlighting during replay for performance
         (inhibit-redisplay t))  ; Prevent redrawing after each insert
     (with-temp-buffer
@@ -1568,6 +1598,9 @@ assistant, nil if no messages."
                             (when text
                               (setq message-count (1+ message-count))
                               (setq last-message-type (intern type))
+                              ;; Collect user messages for history
+                              (when (equal type "user")
+                                (push text user-messages))
                               (with-current-buffer target-buffer
                                 (let ((inhibit-read-only t))
                                   (cond
@@ -1585,6 +1618,10 @@ assistant, nil if no messages."
                                     (insert "\n\n"))))))))))))
               (error nil))))
         (forward-line)))
+    ;; Populate history with user messages (reverse to get chronological order - oldest first)
+    ;; Then reverse again so newest is first (matching matisse--add-to-history behavior)
+    (with-current-buffer target-buffer
+      (setq matisse--history (reverse user-messages)))
     ;; Return the last message type
     last-message-type))
 
@@ -6996,6 +7033,230 @@ end of buffer."
         (message "No %s match for: %s"
                  (if (< direction 0) "previous" "next") (or regexp "[nil]"))))))
 
+;;;; Interactive History Search
+
+(defun matisse--isearch-update-display ()
+  "Update echo area with current search status and match result."
+  (let* ((prompt (if (< matisse--isearch-direction 0)
+                     "I-search backward"
+                   "I-search forward"))
+         (status (cond
+                  (matisse--isearch-failing "Failing ")
+                  (matisse--isearch-wrapped "Wrapped ")
+                  (t "")))
+         (search-display (if (string-empty-p matisse--isearch-string)
+                             ""
+                           matisse--isearch-string)))
+    (message "%s%s: %s" status prompt search-display)))
+
+(defun matisse--isearch-find-match (search-string start-index direction)
+  "Find history entry matching SEARCH-STRING starting from START-INDEX.
+DIRECTION is -1 for backward, 1 for forward.
+Returns index of match or nil if no match found."
+  (when (and matisse--history (not (string-empty-p search-string)))
+    (let ((history-length (length matisse--history))
+          (found-index nil)
+          (search-pattern (if (string-match-p "[.*+?^$\\[]" search-string)
+                              search-string
+                            (concat ".*" (regexp-quote search-string) ".*")))
+          (index start-index))
+      ;; Search in the given direction
+      (while (and (>= index 0)
+                  (< index history-length)
+                  (not found-index))
+        (when (string-match-p search-pattern (nth index matisse--history))
+          (setq found-index index))
+        (setq index (+ index direction)))
+      found-index)))
+
+(defun matisse--isearch-update ()
+  "Update search state and display current match."
+  (if (string-empty-p matisse--isearch-string)
+      ;; Empty search string - show original input
+      (progn
+        (setq matisse--isearch-failing nil
+              matisse--isearch-wrapped nil
+              matisse--history-index matisse--isearch-original-index)
+        (matisse--replace-current-input
+         (or matisse--isearch-original-input ""))
+        (matisse--isearch-update-display))
+    ;; Non-empty search - find match
+    (let* ((start-index (if matisse--history-index
+                            matisse--history-index
+                          (if (< matisse--isearch-direction 0) 0 (1- (length matisse--history)))))
+           (found-index (matisse--isearch-find-match
+                        matisse--isearch-string
+                        start-index
+                        matisse--isearch-direction)))
+      (if found-index
+          (progn
+            (setq matisse--isearch-failing nil
+                  matisse--isearch-wrapped nil
+                  matisse--history-index found-index)
+            (matisse--replace-current-input (nth found-index matisse--history)))
+        ;; No match found
+        (setq matisse--isearch-failing t))
+      (matisse--isearch-update-display))))
+
+(defun matisse--isearch-repeat (direction)
+  "Repeat search in DIRECTION (-1 backward, 1 forward)."
+  (setq matisse--isearch-direction direction)
+  (when (and matisse--history-index
+             (not (string-empty-p matisse--isearch-string)))
+    ;; Move to next position in the specified direction
+    (let* ((next-index (+ matisse--history-index direction))
+           (found-index (matisse--isearch-find-match
+                        matisse--isearch-string
+                        next-index
+                        direction)))
+      (if found-index
+          (progn
+            (setq matisse--isearch-failing nil
+                  matisse--isearch-wrapped nil
+                  matisse--history-index found-index)
+            (matisse--replace-current-input (nth found-index matisse--history)))
+        ;; No more matches - try wrapping
+        (let ((wrap-start (if (< direction 0)
+                              0
+                            (1- (length matisse--history)))))
+          (setq found-index (matisse--isearch-find-match
+                            matisse--isearch-string
+                            wrap-start
+                            direction))
+          (if found-index
+              (progn
+                (setq matisse--isearch-wrapped t
+                      matisse--isearch-failing nil
+                      matisse--history-index found-index)
+                (matisse--replace-current-input (nth found-index matisse--history)))
+            (setq matisse--isearch-failing t))))))
+  (matisse--isearch-update-display))
+
+(defun matisse--isearch-add-char (char)
+  "Add CHAR to search string and update match."
+  (setq matisse--isearch-string
+        (concat matisse--isearch-string (char-to-string char)))
+  (matisse--isearch-update))
+
+(defun matisse--isearch-delete-char ()
+  "Remove last character from search string."
+  (when (> (length matisse--isearch-string) 0)
+    (setq matisse--isearch-string
+          (substring matisse--isearch-string 0 -1))
+    (matisse--isearch-update)))
+
+(defun matisse--isearch-cancel ()
+  "Cancel search and restore original input."
+  (setq matisse--history-index matisse--isearch-original-index)
+  (matisse--replace-current-input
+   (or matisse--isearch-original-input ""))
+  (message "Quit"))
+
+(defun matisse--isearch-exit ()
+  "Exit search mode, keeping current match."
+  (message ""))
+
+(defun matisse--isearch-read-string (direction)
+  "Read search string interactively with live updates in current buffer only.
+DIRECTION is -1 for backward, 1 for forward.
+Returns the final search string or nil if cancelled."
+  (let ((search-string "")
+        (original-input (matisse--get-current-input-text))
+        (original-index matisse--history-index)
+        (keep-reading t)
+        (cancelled nil))
+
+    ;; Save current input for history navigation system
+    (unless matisse--history-index
+      (setq matisse--current-input original-input))
+
+    (setq matisse--isearch-direction direction
+          matisse--isearch-string ""
+          matisse--isearch-failing nil
+          matisse--isearch-wrapped nil
+          matisse--isearch-original-input original-input
+          matisse--isearch-original-index original-index)
+
+    ;; Show initial prompt
+    (matisse--isearch-update-display)
+
+    ;; Read events in a loop - this is scoped to the function call
+    (while keep-reading
+      (let* ((event (read-event))
+             (key (if (characterp event) event nil)))
+        (cond
+         ;; Printable character - add to search string
+         ((and key (>= key 32) (<= key 126))
+          (setq search-string (concat search-string (char-to-string key))
+                matisse--isearch-string search-string)
+          (matisse--isearch-update))
+
+         ;; Backspace/DEL - remove last character
+         ((or (eq event 'backspace) (eq event 127) (eq event 'deletechar))
+          (when (> (length search-string) 0)
+            (setq search-string (substring search-string 0 -1)
+                  matisse--isearch-string search-string)
+            (matisse--isearch-update)))
+
+         ;; C-r - repeat backward
+         ((eq event ?\C-r)
+          (matisse--isearch-repeat -1))
+
+         ;; C-s - repeat forward
+         ((eq event ?\C-s)
+          (matisse--isearch-repeat 1))
+
+         ;; RET - accept
+         ((or (eq event 'return) (eq event ?\r) (eq event 13))
+          (setq keep-reading nil))
+
+         ;; C-g - cancel
+         ((eq event ?\C-g)
+          (setq keep-reading nil
+                cancelled t)
+          (matisse--isearch-cancel))
+
+         ;; Other keys - push back and exit
+         (t
+          (setq unread-command-events (list event)
+                keep-reading nil)))))
+
+    ;; Clean up message if not cancelled
+    (unless cancelled
+      (message ""))
+
+    (if cancelled nil search-string)))
+
+(defun matisse-history-isearch-backward ()
+  "Begin incremental search backward through command history.
+Type characters to build search string, \\`C-r' to find previous match,
+\\`C-s' to find next match, \\`DEL' to remove last search character,
+\\`RET' to accept current match, \\`C-g' to cancel and restore original input."
+  (interactive)
+  ;; Ensure we're in a matisse shell buffer
+  (unless (derived-mode-p 'matisse-shell-mode)
+    (user-error "Not in a matisse shell buffer"))
+
+  (when (not matisse--history)
+    (user-error "No history available"))
+
+  ;; Read search string with live feedback
+  (matisse--isearch-read-string -1))
+
+(defun matisse-history-isearch-forward ()
+  "Begin incremental search forward through command history.
+Like `matisse-history-isearch-backward' but searches forward."
+  (interactive)
+  ;; Ensure we're in a matisse shell buffer
+  (unless (derived-mode-p 'matisse-shell-mode)
+    (user-error "Not in a matisse shell buffer"))
+
+  (when (not matisse--history)
+    (user-error "No history available"))
+
+  ;; Read search string with live feedback
+  (matisse--isearch-read-string 1))
+
 ;;;; History Completing Read
 
 ;;;; Auto-scroll Utility
@@ -7775,6 +8036,8 @@ Provides a clean interface for Claude interactions with visual feedback."
   (local-set-key (kbd matisse-key-history-next-alt) #'matisse-history-next)
   (local-set-key (kbd matisse-key-history-search-backward) #'matisse-history-search-backward)
   (local-set-key (kbd matisse-key-history-search-forward) #'matisse-history-search-forward)
+  (local-set-key (kbd matisse-key-history-isearch-backward) #'matisse-history-isearch-backward)
+  (local-set-key (kbd matisse-key-history-isearch-forward) #'matisse-history-isearch-forward)
   (local-set-key (kbd matisse-key-clear-buffer) #'matisse-clear-buffer)
   (local-set-key (kbd matisse-key-beginning-of-line) #'matisse-bol)
 
