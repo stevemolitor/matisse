@@ -2998,10 +2998,14 @@ Returns alist with token breakdowns: user input, Claude output, agents, etc."
             (let ((user-input-tokens 0)
                   (claude-output-tokens 0)
                   (custom-agent-tokens 0)
+                  (memory-files-tokens 0)
+                  (mcp-servers-tokens 0)
                   (total-input-tokens 0)
                   (model-name (or matisse--current-model "unknown"))
                   (context-window matisse-context-window)
-                  (agents-definition nil))
+                  (agents-definition nil)
+                  (mcp-servers nil)
+                  (claude-md-files '()))
 
               ;; Parse each line
               (while (not (eobp))
@@ -3014,12 +3018,13 @@ Returns alist with token breakdowns: user input, Claude output, agents, etc."
                   (when json-obj
                     (let ((type (alist-get 'type json-obj)))
 
-                      ;; Extract model and agents from init message
+                      ;; Extract model, agents, and MCP servers from init message
                       (when (equal type "system")
                         (let ((subtype (alist-get 'subtype json-obj)))
                           (when (equal subtype "init")
                             (setq model-name (or (alist-get 'model json-obj) model-name))
-                            (setq agents-definition (alist-get 'agents json-obj)))))
+                            (setq agents-definition (alist-get 'agents json-obj))
+                            (setq mcp-servers (alist-get 'mcp_servers json-obj)))))
 
                       ;; Count user message tokens
                       (when (equal type "user")
@@ -3056,6 +3061,32 @@ Returns alist with token breakdowns: user input, Claude output, agents, etc."
                 (setq custom-agent-tokens
                       (matisse--estimate-tokens (json-encode agents-definition))))
 
+              ;; Calculate MCP server tokens if servers are defined
+              (when mcp-servers
+                (setq mcp-servers-tokens
+                      (matisse--estimate-tokens (json-encode mcp-servers))))
+
+              ;; Look for CLAUDE.md files in the actual project directory
+              (let ((project-root (or matisse--initial-directory default-directory)))
+                (when (file-directory-p project-root)
+                  ;; Check for CLAUDE.md files
+                  (dolist (file '("CLAUDE.md" ".claude/CLAUDE.md"))
+                    (let ((full-path (expand-file-name file project-root)))
+                      (when (file-exists-p full-path)
+                        (with-temp-buffer
+                          (insert-file-contents full-path)
+                          (let ((tokens (matisse--estimate-tokens (buffer-string))))
+                            (setq memory-files-tokens (+ memory-files-tokens tokens))
+                            (push (cons full-path tokens) claude-md-files))))))
+                  ;; Also check for global CLAUDE.md
+                  (let ((global-claude-md (expand-file-name "~/.claude/CLAUDE.md")))
+                    (when (file-exists-p global-claude-md)
+                      (with-temp-buffer
+                        (insert-file-contents global-claude-md)
+                        (let ((tokens (matisse--estimate-tokens (buffer-string))))
+                          (setq memory-files-tokens (+ memory-files-tokens tokens))
+                          (push (cons global-claude-md tokens) claude-md-files)))))))
+
               ;; Calculate breakdown
               (let* ((estimated-system-overhead (max 4000 (round (* total-input-tokens 0.05))))
                      (estimated-tools (round (* estimated-system-overhead 0.55)))
@@ -3073,8 +3104,8 @@ Returns alist with token breakdowns: user input, Claude output, agents, etc."
                 `((model . ,model-name)
                   (total-tokens . ,total-used)
                   (system-prompt-tokens . ,estimated-prompt)
-                  (system-tools-tokens . ,estimated-tools)
-                  (memory-files-tokens . 0) ; Not tracked separately
+                  (system-tools-tokens . ,(+ estimated-tools mcp-servers-tokens))
+                  (memory-files-tokens . ,memory-files-tokens)
                   (messages-tokens . ,messages-total)
                   (custom-agent-tokens . ,custom-agent-tokens)
                   (user-input-tokens . ,user-input-tokens)
@@ -3082,7 +3113,9 @@ Returns alist with token breakdowns: user input, Claude output, agents, etc."
                   (reserved-tokens . ,reserved)
                   (free-space-tokens . ,free-space)
                   (context-window . ,context-window)
-                  (percentage-used . ,percentage)))))
+                  (percentage-used . ,percentage)
+                  (mcp-servers-count . ,(if mcp-servers (length mcp-servers) 0))
+                  (claude-md-files . ,claude-md-files)))))
         (error
          (message "Error parsing transcript: %s" (error-message-string err))
          nil)))))
@@ -3105,6 +3138,8 @@ CONTEXT-DATA should be an alist from `matisse--parse-transcript-for-context'."
            (claude-output (alist-get 'claude-output-tokens context-data))
            (reserved (alist-get 'reserved-tokens context-data))
            (free (alist-get 'free-space-tokens context-data))
+           (mcp-count (alist-get 'mcp-servers-count context-data))
+           (claude-md-files (alist-get 'claude-md-files context-data))
            (icon (matisse--get-icon :info))
 
            ;; Calculate percentages for breakdown
@@ -3126,8 +3161,14 @@ CONTEXT-DATA should be an alist from `matisse--parse-transcript-for-context'."
                  model)
                (/ total 1000) (/ window 1000) percent)
        (format "- System prompt:  %6dk tokens (%3.0f%%)\n" (/ sys-prompt 1000) sys-prompt-pct)
-       (format "- System tools:   %6dk tokens (%3.0f%%)\n" (/ sys-tools 1000) sys-tools-pct)
-       (format "- Memory files:   %6dk tokens (%3.0f%%)\n" (/ memory 1000) memory-pct)
+       (format "- System tools:   %6dk tokens (%3.0f%%)" (/ sys-tools 1000) sys-tools-pct)
+       (when (> mcp-count 0)
+         (format " (%d MCP server%s)" mcp-count (if (= mcp-count 1) "" "s")))
+       "\n"
+       (format "- Memory files:   %6dk tokens (%3.0f%%)" (/ memory 1000) memory-pct)
+       (when claude-md-files
+         (format " (%d file%s)" (length claude-md-files) (if (= (length claude-md-files) 1) "" "s")))
+       "\n"
        (format "- Messages:       %6dk tokens (%3.0f%%)\n" (/ messages 1000) messages-pct)
        ;; Nested breakdown for messages
        (when (> custom-agents 0)
