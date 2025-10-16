@@ -25,6 +25,10 @@
 
 ;;;; External function declarations
 (declare-function auth-source-search "auth-source" (&rest spec))
+(declare-function markdown-table-at-point-p "markdown-mode" ())
+(declare-function markdown-table-align "markdown-mode" ())
+(declare-function markdown-table-begin "markdown-mode" (&optional arg))
+(declare-function markdown-table-end "markdown-mode" (&optional arg))
 
 ;;; Customization
 ;;;; Matisse
@@ -805,6 +809,13 @@ Uses orange color to indicate activity."
 
 (defcustom matisse-markdown-fontify-headers t
   "Whether to apply special formatting to markdown headers."
+  :type 'boolean
+  :group 'matisse)
+
+(defcustom matisse-auto-align-tables t
+  "Whether to automatically align markdown tables in LLM output.
+When non-nil, markdown tables will be aligned to have evenly-spaced
+columns for better readability. Requires markdown-mode to be available."
   :type 'boolean
   :group 'matisse)
 
@@ -6334,7 +6345,12 @@ With optional INCREMENTAL non-nil, only process content added since last update.
           (matisse--fontify-list-item
            (car marker-pos) (cdr marker-pos)
            (car space-pos) (cdr space-pos)
-           (car text-pos) (cdr text-pos))))))
+           (car text-pos) (cdr text-pos)))))
+
+      ;; Align markdown tables if enabled
+      (when matisse-auto-align-tables
+        (dolist (table (matisse--find-markdown-tables avoid-ranges start-pos))
+          (matisse--align-markdown-table (car table) (cdr table)))))
 
     ;; Update last processed position
     (setq matisse--last-overlay-position (point-max))))
@@ -6443,6 +6459,61 @@ FULL-START to FULL-END is the entire [text](url) pattern."
             (interactive)
             (browse-url url)))
         (overlay-put text-overlay 'keymap map)))))
+
+(defun matisse--find-markdown-tables (&optional avoid-ranges start-pos)
+  "Find all markdown tables in buffer, avoiding AVOID-RANGES.
+Optional START-POS limits search for incremental updates.
+Returns list of table regions as (start . end) cons cells.
+Uses simple heuristic: looks for consecutive lines starting with |."
+  (let ((tables '())
+        (search-start (or start-pos (point-min))))
+    (save-excursion
+      (goto-char search-start)
+      ;; Search for lines that look like table rows (start with |)
+      (while (re-search-forward "^[ \t]*|" nil t)
+        (let ((line-start (line-beginning-position)))
+          ;; Skip if in avoid-ranges (e.g., inside code blocks)
+          (unless (matisse--position-in-ranges-p line-start avoid-ranges)
+            ;; Found potential table start - scan for consecutive table lines
+            (goto-char line-start)
+            (let ((table-start line-start)
+                  (table-end line-start))
+              ;; Move forward through consecutive lines that look like table rows
+              (while (and (not (eobp))
+                         (looking-at "^[ \t]*|"))
+                (setq table-end (line-end-position))
+                (forward-line 1))
+              ;; Only add if we found at least 2 lines (header + separator or data)
+              (when (> table-end table-start)
+                (setq table-end (1+ table-end)) ; Include the final newline
+                ;; Add this table if we haven't already seen this region
+                (unless (cl-find-if (lambda (existing)
+                                     (and (= (car existing) table-start)
+                                          (= (cdr existing) table-end)))
+                                   tables)
+                  (push (cons table-start table-end) tables))
+                ;; Move past this table
+                (goto-char table-end)))))))
+    (nreverse tables)))
+
+(defun matisse--align-markdown-table (table-start table-end)
+  "Align markdown table between TABLE-START and TABLE-END positions.
+Uses markdown-mode's table alignment function if available."
+  (when (and (fboundp 'markdown-table-align)
+            (require 'markdown-mode nil t))
+    (condition-case err
+        (save-excursion
+          ;; Allow modification of read-only buffer temporarily
+          (let ((inhibit-read-only t))
+            (goto-char table-start)
+            ;; Verify we're within expected bounds
+            (when (< (point) table-end)
+              ;; Call markdown-table-align directly - it will handle table detection
+              (markdown-table-align))))
+      (error
+       ;; Silently ignore errors - table might not be valid or complete
+       (when matisse-verbose-mode
+         (message "Error aligning markdown table: %s" (error-message-string err)))))))
 
 ;;;; Buffer Initialization
 (defun matisse--initialize-buffer ()
