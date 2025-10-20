@@ -614,9 +614,9 @@ Uses purple color suitable for command execution."
   :type 'face
   :group 'matisse-nerd-icon-faces)
 
-(defcustom matisse-nerd-icon-grep-face 'matisse-nerd-icon-yellow
+(defcustom matisse-nerd-icon-grep-face 'matisse-nerd-icon-blue
   "Face for Grep tool nerd icon.
-Uses yellow color suitable for search operations."
+Uses blue color suitable for search operations."
   :type 'face
   :group 'matisse-nerd-icon-faces)
 
@@ -1364,16 +1364,19 @@ then ensures uniqueness with a numeric suffix before the closing asterisk."
 
 (defun matisse--get-working-directory ()
   "Get the working directory for starting a matisse session.
-Returns the project root if in a project, otherwise returns `default-directory'."
+Returns the project root if in a project, otherwise returns `default-directory'.
+Resolves symlinks to ensure consistent project directory paths."
   (if-let* ((proj (project-current)))
-      (expand-file-name (project-root proj))
-    (expand-file-name default-directory)))
+      (file-truename (expand-file-name (project-root proj)))
+    (file-truename (expand-file-name default-directory))))
 
 (defun matisse--get-project-directory ()
-  "Get the project directory for Claude sessions based on initial directory."
+  "Get the project directory for Claude sessions based on initial directory.
+Resolves symlinks to ensure consistent project directory paths."
   (expand-file-name
    (concat "~/.claude/projects/"
-           (let ((dir (directory-file-name (or matisse--initial-directory default-directory))))
+           (let ((dir (directory-file-name
+                      (file-truename (or matisse--initial-directory default-directory)))))
              (if (string-match "^\\(.*\\)/\\([^/]+\\)$" dir)
                  (concat (replace-regexp-in-string "/" "-" (match-string 1 dir))
                          "-" (match-string 2 dir))
@@ -3698,7 +3701,8 @@ JSON-OBJ is the parsed JSON system message object from Claude Code."
           (when initial-tokens
             (setq matisse--total-tokens-used initial-tokens)
             (setq matisse--tokens-since-compact initial-tokens)
-            (message "Resumed session with %d tokens used" initial-tokens)))
+            ;; (message "Resumed session with %d tokens used" initial-tokens)
+            ))
         ;; Clear the flag after first init message so we don't show this again
         (setq matisse--resumed-session nil))
 
