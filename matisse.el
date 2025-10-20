@@ -1131,6 +1131,14 @@ Used for consistent project paths regardless of directory changes.")
   "Pending permission request waiting for user response in buffer.
 Format: (process request-id tool-name tool-input suggestions)")
 
+(defvar-local matisse--last-control-response-time nil
+  "Timestamp of last control_response sent to Claude.
+Used for debugging race conditions where Claude doesn't respond after
+permission grant.")
+
+(defvar-local matisse--stuck-watchdog-timer nil
+  "Timer to detect when we're stuck waiting for Claude after permission grant.")
+
 (defvar-local matisse--spinner-index 0
   "Current index in the spinner sequence.")
 
@@ -1687,7 +1695,29 @@ assistant, nil if no messages."
   (when matisse--spinner-timer
     (cancel-timer matisse--spinner-timer)
     (setq matisse--spinner-timer nil))
+  ;; Also cancel stuck watchdog if it exists
+  (when matisse--stuck-watchdog-timer
+    (cancel-timer matisse--stuck-watchdog-timer)
+    (setq matisse--stuck-watchdog-timer nil))
   (matisse--update-mode-line))
+
+(defun matisse--start-stuck-watchdog (threshold-seconds buffer)
+  "Start watchdog timer to detect if Claude is stuck after permission grant.
+THRESHOLD-SECONDS is how long to wait before warning.
+BUFFER is the matisse buffer to monitor."
+  (when matisse--stuck-watchdog-timer
+    (cancel-timer matisse--stuck-watchdog-timer))
+  (setq matisse--stuck-watchdog-timer
+        (run-with-timer threshold-seconds nil
+                       (lambda (buf)
+                         (when (buffer-live-p buf)
+                           (with-current-buffer buf
+                             (when (and matisse--waiting-for-response
+                                       matisse--last-control-response-time)
+                               (let ((elapsed (float-time (time-subtract (current-time) matisse--last-control-response-time))))
+                                 (matisse--debug-log "WATCHDOG: Still waiting %.1fs after control_response" elapsed)
+                                 (message "Claude appears stuck after permission grant (%.1fs). Try typing 'continue' or C-c C-c to interrupt." elapsed))))))
+                       buffer)))
 
 (defun matisse--finish-current-message ()
   "Mark the current message as finished."
@@ -2421,6 +2451,7 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
                 (cond
                  ;; User chose "accept" - switch to acceptEdits mode
                  ((string= normalized-response "accept")
+                  (matisse--debug-log "EXITPLANMODE: User chose 'accept', switching to acceptEdits mode")
                   (setq matisse--current-permission-mode "acceptEdits")
                   (matisse--update-mode-line)
                   ;; Show decision in buffer
@@ -2429,9 +2460,14 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
                                                   `((behavior . "allow")
                                                     (updatedInput . ,tool-input)
                                                     (updatedPermissions . [((type . "setMode") (mode . "acceptEdits") (destination . "session"))])))
+                  (matisse--debug-log "EXITPLANMODE: Control response sent, setting waiting-for-response=t")
+                  (setq matisse--waiting-for-response t)
                   (matisse--start-spinner)
+                  ;; Start watchdog to detect if Claude gets stuck
+                  (matisse--start-stuck-watchdog 10.0 (current-buffer))
                   ;; Insert new prompt so user can queue next message
-                  (matisse--insert-prompt))
+                  (matisse--insert-prompt)
+                  (matisse--debug-log "EXITPLANMODE: Prompt inserted, waiting for Claude to continue"))
 
                  ;; User chose "yes" - switch to default mode and auto-allow next write tool
                  ((string= normalized-response "yes")
@@ -2448,7 +2484,10 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
                                                   `((behavior . "allow")
                                                     (updatedInput . ,tool-input)
                                                     (updatedPermissions . [((type . "setMode") (mode . "default") (destination . "session"))])))
+                  (setq matisse--waiting-for-response t)
                   (matisse--start-spinner)
+                  ;; Start watchdog to detect if Claude gets stuck
+                  (matisse--start-stuck-watchdog 10.0 (current-buffer))
                   ;; Insert new prompt so user can queue next message
                   (matisse--insert-prompt))
 
@@ -2543,7 +2582,9 @@ RESPONSE is the user's input string (\\='yes\\=', \\='no\\=', or \\='accept\\=')
                 ;; Update animation state based on decision
                 (if (string= decision "allow")
                     ;; Restart the spinner animation after permission is granted
-                    (matisse--start-spinner)
+                    (progn
+                      (setq matisse--waiting-for-response t)
+                      (matisse--start-spinner))
                   ;; Stop animation and clear waiting state on denial
                   (setq matisse--waiting-for-response nil)
                   (matisse--stop-spinner)))
@@ -3837,15 +3878,31 @@ REQUEST-DATA contains tool_name, input, and permission_suggestions."
 PROCESS is the Claude Code process.
 REQUEST-ID is the original request identifier.
 RESPONSE-DATA is the response payload."
-  (let ((response-message
+  (let* ((response-message
          `((type . "control_response")
            (response . ((subtype . "success")
                         (request_id . ,request-id)
-                        (response . ,response-data))))))
+                        (response . ,response-data)))))
+         (json-string (json-encode response-message))
+         (send-time (current-time)))
+
+    ;; Log the control response being sent
+    (matisse--debug-log "CONTROL_RESPONSE: Sending to Claude (request_id=%s, behavior=%s)"
+                        request-id
+                        (alist-get 'behavior response-data))
+    (when-let* ((updated-perms (alist-get 'updatedPermissions response-data)))
+      (matisse--debug-log "CONTROL_RESPONSE: Including updatedPermissions: %S" updated-perms))
 
     ;; Send JSON response with newline delimiter
-    (let ((json-string (json-encode response-message)))
-      (process-send-string process (concat json-string "\n")))))
+    (process-send-string process (concat json-string "\n"))
+
+    ;; Log that send completed
+    (matisse--debug-log "CONTROL_RESPONSE: Sent at %s, waiting-for-response=%s"
+                        (format-time-string "%H:%M:%S.%3N" send-time)
+                        matisse--waiting-for-response)
+
+    ;; Store timestamp for race condition debugging
+    (setq matisse--last-control-response-time send-time)))
 
 (defun matisse--send-control-error (process request-id error-message)
   "Send control error response to Claude Code.
@@ -3971,6 +4028,15 @@ PARAMS contains sessionId and update fields."
                   (matisse--handle-system-message json-obj))
 
                  ((equal (alist-get 'type json-obj) "assistant")
+                  ;; Log timing if this is after a control_response
+                  (when matisse--last-control-response-time
+                    (let ((elapsed (float-time (time-subtract (current-time) matisse--last-control-response-time))))
+                      (matisse--debug-log "ASSISTANT_RESPONSE: Received %.3fs after control_response" elapsed)
+                      (when (> elapsed 5.0)
+                        (matisse--debug-log "WARNING: Long delay (%.3fs) after control_response - possible race condition!" elapsed)))
+                    ;; Clear the timestamp now that we got a response
+                    (setq matisse--last-control-response-time nil))
+
                   ;; Clear pending message since we got a response
                   (setq matisse--pending-message nil)
 
@@ -4121,7 +4187,12 @@ PARAMS contains sessionId and update fields."
                                 (setq matisse--active-tools
                                       (seq-remove (lambda (tool)
                                                    (equal (alist-get 'id tool) tool-use-id))
-                                                 matisse--active-tools))))))))
+                                                 matisse--active-tools))
+                                ;; Update mode-line after tool completes
+                                (matisse--debug-log "Tool %s completed, %d tools remaining"
+                                                    tool-name
+                                                    (length matisse--active-tools))
+                                (matisse--update-mode-line)))))))
 
                     (when (stringp content)
                       (cond
