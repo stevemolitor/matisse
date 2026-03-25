@@ -3749,17 +3749,16 @@ JSON-OBJ is the parsed JSON system message object from Claude Code."
 
       ;; Extract slash commands from init message
       ;; slash_commands is a vector of strings without "/" prefix
+      ;; Note: Additional command updates will arrive via session/update notifications
       (let ((slash-commands (alist-get 'slash_commands json-obj)))
         (when slash-commands
           ;; Add "/" prefix to each command for consistency with completion system
           (setq matisse--available-commands
                 (mapcar (lambda (cmd) (concat "/" cmd))
-                        (append slash-commands nil)))))
-      ;; Immediately request full commands list for more detailed info
-      ;; Note: get_commands response may also include models
-      (matisse--debug-log "Requesting commands after init")
-      (let ((commands-sent (matisse--send-control-request "get_commands")))
-        (matisse--debug-log "Commands request sent: %s" commands-sent)))
+                        (append slash-commands nil)))
+          (matisse--debug-log "Discovered %d commands from init: %s"
+                             (length matisse--available-commands)
+                             matisse--available-commands))))
 
      ((equal subtype "compact_boundary")
       (let ((compact-metadata (alist-get 'compactMetadata json-obj)))
@@ -3796,11 +3795,6 @@ REQUEST is the parsed JSON control request."
      ;; Handle permission requests
      ((equal subtype "can_use_tool")
       (matisse--handle-can-use-tool-request process request-id request-data))
-
-     ;; Ignore echoed get_commands request
-     ;; This is a request WE sent that Claude is echoing back
-     ((equal subtype "get_commands")
-      (matisse--debug-log "Ignoring echoed control request: %s" subtype))
 
      ;; Unknown request type
      (t
