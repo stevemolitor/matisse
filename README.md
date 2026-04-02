@@ -96,6 +96,37 @@ Set your API key (choose one method):
 (setq matisse-spinner-interval 0.1)  ; Faster blinking
 ```
 
+### Permission Modes
+
+Matisse supports several permission modes that control how Claude's tool usage is authorized. You can cycle through modes with `M-x matisse-cycle-permission-mode`:
+
+| Mode | Description |
+|------|-------------|
+| `default` | Normal permissions with confirmation prompts |
+| `plan` | Plan mode for planning tasks |
+| `acceptEdits` | Auto-accept file edits (Edit, Write, MultiEdit) |
+| `yolo` | Client-side auto-allow all permissions (opt-in, see below) |
+| `bypassPermissions` | Skip all permission checks (startup only) |
+
+The default cycle order is: **plan -> default -> acceptEdits -> plan**.
+
+```elisp
+;; Set the initial permission mode (default: "default")
+(setq matisse-permission-mode "default")
+```
+
+#### YOLO Mode
+
+YOLO mode auto-approves all permission requests client-side. Unlike `bypassPermissions`, the Claude Code CLI still runs in `default` mode and sends permission requests over the STDIO protocol -- Matisse simply auto-responds "allow" to all of them. This means the permission protocol is still flowing and you can toggle YOLO off mid-session to return to prompted mode.
+
+YOLO mode is excluded from the permission cycle by default. To include it:
+
+```elisp
+(setq matisse-enable-yolo-mode t)
+```
+
+With this enabled, the cycle becomes: **plan -> default -> acceptEdits -> yolo -> plan**.
+
 ### Selection Context Tracking
 
 Matisse automatically tracks your text selections and cursor position, providing Claude with context about what code you're working on. This feature is enabled by default and works seamlessly in the background.

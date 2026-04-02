@@ -133,6 +133,14 @@ Options are:
                  (const :tag "YOLO Mode" "yolo"))
   :group 'matisse)
 
+(defcustom matisse-enable-yolo-mode nil
+  "When non-nil, include YOLO mode in the permission mode cycle.
+YOLO mode auto-allows all permissions client-side without prompting.
+When nil (the default), YOLO mode is excluded from the cycle but can
+still be set directly via `matisse-permission-mode'."
+  :type 'boolean
+  :group 'matisse)
+
 (defcustom matisse-in-buffer-permission-prompts t
   "When non-nil, show permission prompts in the buffer instead of minibuffer.
 Users can respond by typing \\='yes\\=', \\='no\\=', or \\='accept\\=' at the prompt.
@@ -5238,7 +5246,9 @@ Note: bypassPermissions mode can only be set at session startup via
 ;;;###autoload
 (defun matisse-cycle-permission-mode ()
   "Cycle through permission modes.
-Order: plan -> default -> acceptEdits -> yolo -> plan.
+Order: plan -> default -> acceptEdits -> plan.
+If `matisse-enable-yolo-mode' is non-nil, includes yolo:
+plan -> default -> acceptEdits -> yolo -> plan.
 Note: bypassPermissions mode can only be set at session startup
 via `matisse-permission-mode' variable.
 Works globally - finds the appropriate matisse buffer if not already in one."
@@ -5249,7 +5259,8 @@ Works globally - finds the appropriate matisse buffer if not already in one."
                (next (cond
                       ((string= current "plan") "default")
                       ((string= current "default") "acceptEdits")
-                      ((string= current "acceptEdits") "yolo")
+                      ((string= current "acceptEdits")
+                       (if matisse-enable-yolo-mode "yolo" "plan"))
                       ((string= current "yolo") "plan")
                       ;; If somehow in bypassPermissions (set at startup), cycle to plan
                       ((string= current "bypassPermissions") "plan")
